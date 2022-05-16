@@ -1,7 +1,8 @@
 use crate::vminterface::AvmType;
 use gc_arena::Collect;
 use std::sync::Arc;
-use swf::{Fixed8, HeaderExt, Rectangle, TagCode, Twips};
+use swf::{Fixed8, HeaderExt, Rectangle, TagCode};
+use crate::prelude::Twips;
 
 pub type Error = Box<dyn std::error::Error>;
 pub type DecodeResult = Result<(), Error>;

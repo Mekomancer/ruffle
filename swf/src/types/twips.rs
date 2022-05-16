@@ -42,7 +42,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
-    /// use swf::Twips;
+    /// use crate::prelude::Twips;
     ///
     /// let twips = Twips::new(40);
     /// ```
@@ -55,7 +55,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
-    /// use swf::Twips;
+    /// use crate::prelude::Twips;
     ///
     /// let twips = Twips::new(47);
     /// assert_eq!(twips.get(), 47);
@@ -71,7 +71,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
-    /// use swf::Twips;
+    /// use crate::prelude::Twips;
     ///
     /// // 40 pixels is equivalent to 800 twips.
     /// let twips = Twips::from_pixels(40.0);
@@ -92,7 +92,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
-    /// use swf::Twips;
+    /// use crate::prelude::Twips;
     ///
     /// // 800 twips is equivalent to 40 pixels.
     /// let twips = Twips::new(800);
@@ -112,7 +112,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
-    /// use swf::Twips;
+    /// use crate::prelude::Twips;
     ///
     /// assert_eq!(Twips::new(40).saturating_sub(Twips::new(20)), Twips::new(20));
     /// assert_eq!(Twips::new(i32::MIN).saturating_sub(Twips::new(5)), Twips::new(i32::MIN));

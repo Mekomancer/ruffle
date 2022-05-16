@@ -11,7 +11,7 @@ use crate::display_object::{DisplayObject, HitTestOptions, TDisplayObject};
 use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use gc_arena::{GcCell, MutationContext};
-use swf::Twips;
+use crate::prelude::Twips;
 
 /// Implements `flash.display.DisplayObject`'s instance constructor.
 pub fn instance_init<'gc>(

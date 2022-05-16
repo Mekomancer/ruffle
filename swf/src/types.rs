@@ -8,12 +8,13 @@
 //! Also check out Twips2d.rs
 use crate::string::SwfStr;
 use bitflags::bitflags;
-
 mod fixed;
 mod matrix;
-
+mod twips;
 pub use fixed::*;
 pub use matrix::Matrix;
+pub use twips::Twips;
+
 
 /// A complete header and tags in the SWF file.
 /// This is returned by the `swf::parse_swf` convenience method.

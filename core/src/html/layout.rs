@@ -11,7 +11,7 @@ use crate::tag_utils::SwfMovie;
 use gc_arena::Collect;
 use std::cmp::{max, min};
 use std::sync::Arc;
-use swf::Twips;
+use crate::prelude::Twips;
 
 /// Draw an underline on a particular drawing.
 ///
