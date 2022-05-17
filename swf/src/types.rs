@@ -11,9 +11,11 @@ use bitflags::bitflags;
 mod fixed;
 mod matrix;
 mod twips;
+mod twips_2d;
 pub use fixed::*;
 pub use matrix::Matrix;
 pub use twips::Twips;
+pub use twips_2d::Twips2d;
 
 
 /// A complete header and tags in the SWF file.

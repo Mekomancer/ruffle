@@ -9,7 +9,7 @@ pub use crate::impl_display_object_container;
 pub use crate::matrix::Matrix;
 pub use log::{error, info, trace, warn};
 pub use std::ops::{Bound, RangeBounds};
-pub use swf::{CharacterId, Color, Twips};
+pub use swf::{CharacterId, Color, Twips,Twips2d};
 
 /// A depth for a Flash display object in AVM1.
 /// This is different than defined in `swf`; during execution, clips

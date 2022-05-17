@@ -1,0 +1,439 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_core'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_core"
+                ],
+                "filter": {
+                    "name": "ruffle_core",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_wstr'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_wstr"
+                ],
+                "filter": {
+                    "name": "ruffle_wstr",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'swf'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=swf"
+                ],
+                "filter": {
+                    "name": "swf",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'reading'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=reading",
+                    "--package=swf"
+                ],
+                "filter": {
+                    "name": "reading",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'reading'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=reading",
+                    "--package=swf"
+                ],
+                "filter": {
+                    "name": "reading",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'writing'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=writing",
+                    "--package=swf"
+                ],
+                "filter": {
+                    "name": "writing",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'writing'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=writing",
+                    "--package=swf"
+                ],
+                "filter": {
+                    "name": "writing",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ruffle_desktop'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ruffle_desktop",
+                    "--package=ruffle_desktop"
+                ],
+                "filter": {
+                    "name": "ruffle_desktop",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ruffle_desktop'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ruffle_desktop",
+                    "--package=ruffle_desktop"
+                ],
+                "filter": {
+                    "name": "ruffle_desktop",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_render_wgpu'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_render_wgpu"
+                ],
+                "filter": {
+                    "name": "ruffle_render_wgpu",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_render_common_tess'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_render_common_tess"
+                ],
+                "filter": {
+                    "name": "ruffle_render_common_tess",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_web'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_web"
+                ],
+                "filter": {
+                    "name": "ruffle_web",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_render_canvas'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_render_canvas"
+                ],
+                "filter": {
+                    "name": "ruffle_render_canvas",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_web_common'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_web_common"
+                ],
+                "filter": {
+                    "name": "ruffle_web_common",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_render_webgl'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_render_webgl"
+                ],
+                "filter": {
+                    "name": "ruffle_render_webgl",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ruffle_web_safari'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ruffle_web_safari",
+                    "--package=ruffle_web_safari"
+                ],
+                "filter": {
+                    "name": "ruffle_web_safari",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ruffle_web_safari'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ruffle_web_safari",
+                    "--package=ruffle_web_safari"
+                ],
+                "filter": {
+                    "name": "ruffle_web_safari",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ruffle_scanner'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ruffle_scanner",
+                    "--package=ruffle_scanner"
+                ],
+                "filter": {
+                    "name": "ruffle_scanner",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ruffle_scanner'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ruffle_scanner",
+                    "--package=ruffle_scanner"
+                ],
+                "filter": {
+                    "name": "ruffle_scanner",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'exporter'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=exporter",
+                    "--package=exporter"
+                ],
+                "filter": {
+                    "name": "exporter",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'exporter'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=exporter",
+                    "--package=exporter"
+                ],
+                "filter": {
+                    "name": "exporter",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'regression_tests'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=regression_tests",
+                    "--package=tests"
+                ],
+                "filter": {
+                    "name": "regression_tests",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ruffle_input_format'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ruffle_input_format"
+                ],
+                "filter": {
+                    "name": "ruffle_input_format",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
