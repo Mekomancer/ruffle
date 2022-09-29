@@ -17,7 +17,6 @@ impl Twips {
     /// There are 20 twips in a pixel.
     pub const TWIPS_PER_PIXEL: i32 = 20;
 
-
     /// The `Twips` object with a value of `0`.
     ///
     /// # Examples
@@ -35,7 +34,6 @@ impl Twips {
     /// assert_eq!(swf::Twips::ONE.to_pixels(), 1.0);
     /// ```
     pub const ONE: Self = Self(Self::TWIPS_PER_PIXEL);
-
 
     /// Creates a new `Twips` object. Note that the `twips` value is in twips,
     /// not pixels. Use the [`from_pixels`] method to convert from pixel units.
