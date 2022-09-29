@@ -28,7 +28,7 @@ use crate::vminterface::{AvmObject, AvmType, Instantiator};
 use chrono::Utc;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::{cell::Ref, cell::RefMut, sync::Arc};
-use crate::prelude::Twips;
+use swf::Twips;
 
 /// Boxed error type.
 pub type Error = Box<dyn std::error::Error>;

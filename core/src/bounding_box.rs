@@ -1,6 +1,6 @@
 use crate::matrix::Matrix;
 use gc_arena::Collect;
-use crate::prelude::Twips;
+use swf::Twips;
 
 #[derive(Clone, Debug, PartialEq, Collect, Default)]
 #[collect(require_static)]

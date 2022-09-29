@@ -549,7 +549,7 @@ mod tests {
     use crate::string::WStr;
     use gc_arena::{rootless_arena, MutationContext};
     use std::ops::DerefMut;
-    use crate::prelude::Twips;
+    use swf::Twips;
 
     fn with_device_font<F>(callback: F)
     where

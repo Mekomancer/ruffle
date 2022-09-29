@@ -8,7 +8,7 @@ use crate::avm2::value::Value;
 use crate::avm2::{AvmString, Error};
 use crate::display_object::{TDisplayObject, TInteractiveObject};
 use gc_arena::{GcCell, MutationContext};
-use crate::prelude::Twips;
+use swf::Twips;
 
 /// Implements `flash.events.MouseEvent`'s instance constructor.
 pub fn instance_init<'gc>(

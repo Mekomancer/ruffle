@@ -8,7 +8,6 @@ use crate::{
 use bitstream_io::BitRead;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{self, Read};
-use crate::types::Twips;
 
 /// Parse a decompressed SWF.
 ///
