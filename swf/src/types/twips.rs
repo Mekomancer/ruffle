@@ -9,12 +9,14 @@
 ///
 /// [`from_pixels`]: Twips::from_pixels
 /// [`to_pixels`]: Twips::to_pixels
+
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Twips(i32);
 
 impl Twips {
     /// There are 20 twips in a pixel.
     pub const TWIPS_PER_PIXEL: i32 = 20;
+
 
     /// The `Twips` object with a value of `0`.
     ///
@@ -34,6 +36,7 @@ impl Twips {
     /// ```
     pub const ONE: Self = Self(Self::TWIPS_PER_PIXEL);
 
+
     /// Creates a new `Twips` object. Note that the `twips` value is in twips,
     /// not pixels. Use the [`from_pixels`] method to convert from pixel units.
     ///
@@ -42,6 +45,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
+
     /// use swf::Twips;
     ///
     /// let twips = Twips::new(40);
@@ -71,7 +75,9 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
+
     /// use swf::Twips;
+
     ///
     /// // 40 pixels is equivalent to 800 twips.
     /// let twips = Twips::from_pixels(40.0);
@@ -97,6 +103,7 @@ impl Twips {
     /// # Examples
     ///
     /// ```rust
+
     /// use swf::Twips;
     ///
     /// // 800 twips is equivalent to 40 pixels.
@@ -163,7 +170,6 @@ impl std::ops::DivAssign<i32> for Twips {
         self.0 /= other
     }
 }
-
 impl std::ops::Neg for Twips {
     type Output = Self;
     fn neg(self) -> Self {
