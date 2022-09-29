@@ -1,6 +1,6 @@
 use clipboard::{ClipboardContext, ClipboardProvider};
 use rfd::{MessageButtons, MessageDialog, MessageLevel};
-use ruffle_core::backend::ui::{Error, MouseCursor, UiBackend};
+use ruffle_core::backend::ui::{FullscreenError, MouseCursor, UiBackend};
 use std::rc::Rc;
 use winit::window::{Fullscreen, Window};
 
@@ -22,7 +22,8 @@ impl DesktopUiBackend {
 
 // TODO: Move link to https://ruffle.rs/faq or similar
 const UNSUPPORTED_CONTENT_MESSAGE: &str = "\
-This content is not yet supported by Ruffle and will likely not run as intended.
+The Ruffle emulator does not yet support ActionScript 3, required by this content.
+If you choose to run it anyway, interactivity will be missing or limited.
 
 See the following link for more info:
 https://github.com/ruffle-rs/ruffle/wiki/Frequently-Asked-Questions-For-Users";
@@ -54,7 +55,7 @@ impl UiBackend for DesktopUiBackend {
         self.clipboard.set_contents(content).unwrap();
     }
 
-    fn set_fullscreen(&mut self, is_full: bool) -> Result<(), Error> {
+    fn set_fullscreen(&mut self, is_full: bool) -> Result<(), FullscreenError> {
         self.window.set_fullscreen(if is_full {
             Some(Fullscreen::Borderless(None))
         } else {

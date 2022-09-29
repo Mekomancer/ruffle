@@ -2,6 +2,7 @@
 members = [
     "core",
     "core/macros",
+    "core/build_playerglobal",
     "desktop",
     "swf",
     "web",
@@ -10,10 +11,13 @@ members = [
     "scanner",
     "exporter",
 
+    "render",
     "render/canvas",
     "render/wgpu",
-    "render/common_tess",
     "render/webgl",
+
+    "video",
+    "video/software",
 
     "tests",
     "tests/input-format",

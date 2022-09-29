@@ -288,7 +288,7 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    fn write_rectangle(&mut self, rectangle: &Rectangle) -> Result<()> {
+    fn write_rectangle(&mut self, rectangle: &Rectangle<Twips>) -> Result<()> {
         let num_bits = [
             rectangle.x_min,
             rectangle.x_max,
@@ -706,7 +706,7 @@ impl<W: Write> Writer<W> {
             Tag::DoAbc(ref do_abc) => {
                 let len = do_abc.data.len() + do_abc.name.len() + 5;
                 self.write_tag_header(TagCode::DoAbc, len as u32)?;
-                self.write_u32(if do_abc.is_lazy_initialize { 1 } else { 0 })?;
+                self.write_u32(do_abc.flags.bits())?;
                 self.write_string(do_abc.name)?;
                 self.output.write_all(do_abc.data)?;
             }
@@ -799,7 +799,7 @@ impl<W: Write> Writer<W> {
                 self.write_u16(tab_index)?;
             }
 
-            Tag::PlaceObject(ref place_object) => match (*place_object).version {
+            Tag::PlaceObject(ref place_object) => match place_object.version {
                 1 => self.write_place_object(place_object)?,
                 2 => self.write_place_object_2_or_3(place_object, 2)?,
                 3 => self.write_place_object_2_or_3(place_object, 3)?,
@@ -1060,13 +1060,7 @@ impl<W: Write> Writer<W> {
             if data.version >= 2 {
                 writer.write_rectangle(&data.start.edge_bounds)?;
                 writer.write_rectangle(&data.end.edge_bounds)?;
-                writer.write_u8(
-                    if data.has_non_scaling_strokes {
-                        0b10
-                    } else {
-                        0
-                    } | if data.has_scaling_strokes { 0b1 } else { 0 },
-                )?;
+                writer.write_u8(data.flags.bits())?;
             }
 
             // Offset to EndEdges.
@@ -1280,17 +1274,7 @@ impl<W: Write> Writer<W> {
             writer.write_rectangle(&shape.shape_bounds)?;
             if shape.version >= 4 {
                 writer.write_rectangle(&shape.edge_bounds)?;
-                writer.write_u8(
-                    if shape.has_fill_winding_rule {
-                        0b100
-                    } else {
-                        0
-                    } | if shape.has_non_scaling_strokes {
-                        0b10
-                    } else {
-                        0
-                    } | if shape.has_scaling_strokes { 0b1 } else { 0 },
-                )?;
+                writer.write_u8(shape.flags.bits())?;
             }
 
             let (num_fill_bits, num_line_bits) =
@@ -2278,63 +2262,30 @@ impl<W: Write> Writer<W> {
             let mut writer = Writer::new(&mut buf, self.version);
             writer.write_character_id(edit_text.id)?;
             writer.write_rectangle(&edit_text.bounds)?;
-            let flags = if edit_text.initial_text.is_some() {
-                0b10000000
-            } else {
-                0
-            } | if edit_text.is_word_wrap { 0b1000000 } else { 0 }
-                | if edit_text.is_multiline { 0b100000 } else { 0 }
-                | if edit_text.is_password { 0b10000 } else { 0 }
-                | if edit_text.is_read_only { 0b1000 } else { 0 }
-                | if edit_text.color.is_some() { 0b100 } else { 0 }
-                | if edit_text.max_length.is_some() {
-                    0b10
-                } else {
-                    0
-                }
-                | if edit_text.font_id.is_some() { 0b1 } else { 0 };
-            let flags2 = if edit_text.font_class_name.is_some() {
-                0b10000000
-            } else {
-                0
-            } | if edit_text.is_auto_size { 0b1000000 } else { 0 }
-                | if edit_text.layout.is_some() {
-                    0b100000
-                } else {
-                    0
-                }
-                | if !edit_text.is_selectable { 0b10000 } else { 0 }
-                | if edit_text.has_border { 0b1000 } else { 0 }
-                | if edit_text.was_static { 0b100 } else { 0 }
-                | if edit_text.is_html { 0b10 } else { 0 }
-                | if !edit_text.is_device_font { 0b1 } else { 0 };
+            writer.write_u16(edit_text.flags.bits() as u16)?;
 
-            writer.write_u8(flags)?;
-            writer.write_u8(flags2)?;
-
-            if let Some(font_id) = edit_text.font_id {
+            if let Some(font_id) = edit_text.font_id() {
                 writer.write_character_id(font_id)?;
             }
 
             // TODO(Herschel): Check SWF version.
-            if let Some(class) = edit_text.font_class_name {
+            if let Some(class) = edit_text.font_class() {
                 writer.write_string(class)?;
             }
 
-            // TODO(Herschel): Height only exists iff HasFontId, maybe for HasFontClass too?
-            if let Some(height) = edit_text.height {
+            if let Some(height) = edit_text.height() {
                 writer.write_u16(height.get() as u16)?
             }
 
-            if let Some(ref color) = edit_text.color {
+            if let Some(color) = edit_text.color() {
                 writer.write_rgba(color)?
             }
 
-            if let Some(len) = edit_text.max_length {
+            if let Some(len) = edit_text.max_length() {
                 writer.write_u16(len)?;
             }
 
-            if let Some(ref layout) = edit_text.layout {
+            if let Some(layout) = edit_text.layout() {
                 writer.write_u8(layout.align as u8)?;
                 writer.write_u16(layout.left_margin.get() as u16)?; // TODO: Handle overflow
                 writer.write_u16(layout.right_margin.get() as u16)?;
@@ -2343,7 +2294,8 @@ impl<W: Write> Writer<W> {
             }
 
             writer.write_string(edit_text.variable_name)?;
-            if let Some(text) = edit_text.initial_text {
+
+            if let Some(text) = edit_text.initial_text() {
                 writer.write_string(text)?;
             }
         }
@@ -2376,6 +2328,7 @@ impl<W: Write> Writer<W> {
     }
 
     fn write_debug_id(&mut self, debug_id: &DebugId) -> Result<()> {
+        self.write_tag_header(TagCode::DebugId, debug_id.len() as u32)?;
         self.output.write_all(debug_id)?;
         Ok(())
     }
@@ -2661,7 +2614,7 @@ mod tests {
 
     #[test]
     fn write_rectangle_zero() {
-        let rect: Rectangle = Default::default();
+        let rect: Rectangle<Twips> = Default::default();
         let mut buf = Vec::new();
         {
             let mut writer = Writer::new(&mut buf, 1);

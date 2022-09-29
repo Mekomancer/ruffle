@@ -119,7 +119,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
         AmfValue::String(s) => Value::String(AvmString::new_utf8(activation.context.gc_context, s)),
         AmfValue::Bool(b) => (*b).into(),
         AmfValue::ECMAArray(_, associative, len) => {
-            let array_constructor = activation.context.avm1.prototypes.array_constructor;
+            let array_constructor = activation.context.avm1.prototypes().array_constructor;
             if let Ok(Value::Object(obj)) =
                 array_constructor.construct(activation, &[(*len).into()])
             {
@@ -145,9 +145,9 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
         }
         AmfValue::Object(elements, _) => {
             // Deserialize Object
-            let obj = ScriptObject::object(
+            let obj = ScriptObject::new(
                 activation.context.gc_context,
-                Some(activation.context.avm1.prototypes.object),
+                Some(activation.context.avm1.prototypes().object),
             );
             for entry in elements {
                 let value = deserialize_value(activation, entry.value());
@@ -162,7 +162,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             obj.into()
         }
         AmfValue::Date(time, _) => {
-            let date_proto = activation.context.avm1.prototypes.date_constructor;
+            let date_proto = activation.context.avm1.prototypes().date_constructor;
 
             if let Ok(Value::Object(obj)) = date_proto.construct(activation, &[(*time).into()]) {
                 Value::Object(obj)
@@ -171,7 +171,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             }
         }
         AmfValue::XML(content, _) => {
-            let xml_proto = activation.context.avm1.prototypes.xml_constructor;
+            let xml_proto = activation.context.avm1.prototypes().xml_constructor;
 
             if let Ok(Value::Object(obj)) = xml_proto.construct(
                 activation,
@@ -195,9 +195,9 @@ fn deserialize_lso<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     lso: &Lso,
 ) -> Result<Object<'gc>, Error<'gc>> {
-    let obj = ScriptObject::object(
+    let obj = ScriptObject::new(
         activation.context.gc_context,
-        Some(activation.context.avm1.prototypes.object),
+        Some(activation.context.avm1.prototypes().object),
     );
 
     for child in &lso.body {
@@ -337,12 +337,16 @@ pub fn get_local<'gc>(
     }
 
     // Check if this is referencing an existing shared object
-    if let Some(so) = activation.context.shared_objects.get(&full_name) {
+    if let Some(so) = activation.context.avm1_shared_objects.get(&full_name) {
         return Ok((*so).into());
     }
 
     // Data property only should exist when created with getLocal/Remote
-    let constructor = activation.context.avm1.prototypes.shared_object_constructor;
+    let constructor = activation
+        .context
+        .avm1
+        .prototypes()
+        .shared_object_constructor;
     let this = constructor
         .construct(activation, &[])?
         .coerce_to_object(activation);
@@ -362,9 +366,9 @@ pub fn get_local<'gc>(
 
     if data == Value::Undefined {
         // No data; create a fresh data object.
-        data = ScriptObject::object(
+        data = ScriptObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.object),
+            Some(activation.context.avm1.prototypes().object),
         )
         .into();
     }
@@ -376,7 +380,10 @@ pub fn get_local<'gc>(
         Attribute::DONT_DELETE,
     );
 
-    activation.context.shared_objects.insert(full_name, this);
+    activation
+        .context
+        .avm1_shared_objects
+        .insert(full_name, this);
 
     Ok(this.into())
 }

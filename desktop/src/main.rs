@@ -15,15 +15,17 @@ mod ui;
 
 use crate::custom_event::RuffleEvent;
 use crate::executor::GlutinAsyncExecutor;
+use anyhow::{anyhow, Context, Error};
 use clap::Parser;
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient};
 use rfd::FileDialog;
 use ruffle_core::{
     config::Letterbox, events::KeyCode, tag_utils::SwfMovie, Player, PlayerBuilder, PlayerEvent,
-    StageDisplayState,
+    StageDisplayState, StaticCallstack, ViewportDimensions,
 };
+use ruffle_render_wgpu::backend::WgpuRenderBackend;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
-use ruffle_render_wgpu::WgpuRenderBackend;
+use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -36,7 +38,11 @@ use winit::event::{
     WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Icon, Window, WindowBuilder};
+use winit::window::{Fullscreen, Icon, Window, WindowBuilder};
+
+thread_local! {
+    static CALLSTACK: RefCell<Option<StaticCallstack>> = RefCell::default();
+}
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -46,49 +52,53 @@ use winit::window::{Icon, Window, WindowBuilder};
 )]
 struct Opt {
     /// Path to a Flash movie (SWF) to play.
-    #[clap(name = "FILE", parse(from_os_str))]
+    #[clap(name = "FILE", value_parser)]
     input_path: Option<PathBuf>,
 
     /// A "flashvars" parameter to provide to the movie.
     /// This can be repeated multiple times, for example -Pkey=value -Pfoo=bar.
-    #[clap(short = 'P', number_of_values = 1, multiple_occurrences = true)]
+    #[clap(short = 'P', number_of_values = 1, action = clap::ArgAction::Append)]
     parameters: Vec<String>,
 
     /// Type of graphics backend to use. Not all options may be supported by your current system.
     /// Default will attempt to pick the most supported graphics backend.
-    #[clap(long, short, default_value = "default", arg_enum)]
+    #[clap(long, short, default_value = "default", arg_enum, value_parser)]
     graphics: GraphicsBackend,
 
     /// Power preference for the graphics device used. High power usage tends to prefer dedicated GPUs,
     /// whereas a low power usage tends prefer integrated GPUs.
-    #[clap(long, short, default_value = "high", arg_enum)]
+    #[clap(long, short, default_value = "high", arg_enum, value_parser)]
     power: PowerPreference,
 
     /// Width of window in pixels.
-    #[clap(long, display_order = 1)]
+    #[clap(long, display_order = 1, value_parser)]
     width: Option<f64>,
 
     /// Height of window in pixels.
-    #[clap(long, display_order = 2)]
+    #[clap(long, display_order = 2, value_parser)]
     height: Option<f64>,
 
     /// Location to store a wgpu trace output
-    #[clap(long, parse(from_os_str))]
+    #[clap(long, value_parser)]
     #[cfg(feature = "render_trace")]
     trace_path: Option<PathBuf>,
 
     /// Proxy to use when loading movies via URL.
-    #[clap(long)]
+    #[clap(long, value_parser)]
     proxy: Option<Url>,
 
     /// Replace all embedded HTTP URLs with HTTPS.
-    #[clap(long, takes_value = false)]
+    #[clap(long, action)]
     upgrade_to_https: bool,
 
-    #[clap(long, takes_value = false)]
+    /// Start application in fullscreen.
+    #[clap(long, action)]
+    fullscreen: bool,
+
+    #[clap(long, action)]
     timedemo: bool,
 
-    #[clap(long, takes_value = false)]
+    #[clap(long, action)]
     dont_warn_on_unsupported_content: bool,
 }
 
@@ -107,16 +117,27 @@ fn trace_path(_opt: &Opt) -> Option<&Path> {
     None
 }
 
-fn parse_url(path: &Path) -> Result<Url, Box<dyn std::error::Error>> {
+fn parse_url(path: &Path) -> Result<Url, Error> {
     Ok(if path.exists() {
         let absolute_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
         Url::from_file_path(absolute_path)
-            .map_err(|_| "Path must be absolute and cannot be a URL")?
+            .map_err(|_| anyhow!("Path must be absolute and cannot be a URL"))?
     } else {
         Url::parse(path.to_str().unwrap_or_default())
             .ok()
             .filter(|url| url.host().is_some())
-            .ok_or("Input path is not a file and could not be parsed as a URL.")?
+            .ok_or_else(|| anyhow!("Input path is not a file and could not be parsed as a URL."))?
+    })
+}
+
+fn parse_parameters(opt: &Opt) -> impl '_ + Iterator<Item = (String, String)> {
+    opt.parameters.iter().map(|parameter| {
+        let mut split = parameter.splitn(2, '=');
+        if let (Some(key), Some(value)) = (split.next(), split.next()) {
+            (key.to_owned(), value.to_owned())
+        } else {
+            (parameter.clone(), "".to_string())
+        }
     })
 }
 
@@ -127,156 +148,145 @@ fn pick_file() -> Option<PathBuf> {
         .pick_file()
 }
 
-fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Box<dyn std::error::Error>> {
+fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Error> {
     let mut movie = if url.scheme() == "file" {
-        SwfMovie::from_path(url.to_file_path().unwrap(), None)?
+        SwfMovie::from_path(url.to_file_path().unwrap(), None)
+            .map_err(|e| anyhow!(e.to_string()))
+            .context("Couldn't load swf")?
     } else {
         let proxy = opt.proxy.as_ref().and_then(|url| url.as_str().parse().ok());
         let builder = HttpClient::builder()
             .proxy(proxy)
             .redirect_policy(RedirectPolicy::Follow);
-        let client = builder.build()?;
-        let response = client.get(url.to_string())?;
+        let client = builder.build().context("Couldn't create HTTP client")?;
+        let response = client
+            .get(url.to_string())
+            .with_context(|| format!("Couldn't load URL {}", url))?;
         let mut buffer: Vec<u8> = Vec::new();
-        response.into_body().read_to_end(&mut buffer)?;
+        response
+            .into_body()
+            .read_to_end(&mut buffer)
+            .context("Couldn't read response from server")?;
 
-        SwfMovie::from_data(&buffer, Some(url.to_string()), None)?
+        SwfMovie::from_data(&buffer, Some(url.to_string()), None)
+            .map_err(|e| anyhow!(e.to_string()))
+            .context("Couldn't load swf")?
     };
 
-    let parameters = opt.parameters.iter().map(|parameter| {
-        let mut split = parameter.splitn(2, '=');
-        if let (Some(key), Some(value)) = (split.next(), split.next()) {
-            (key.to_owned(), value.to_owned())
-        } else {
-            (parameter.clone(), "".to_string())
-        }
-    });
-    movie.append_parameters(parameters);
+    movie.append_parameters(parse_parameters(opt));
 
     Ok(movie)
 }
 
 struct App {
-    #[allow(dead_code)]
     opt: Opt,
     window: Rc<Window>,
     event_loop: EventLoop<RuffleEvent>,
     executor: Arc<Mutex<GlutinAsyncExecutor>>,
     player: Arc<Mutex<Player>>,
-    loaded: bool,
 }
 
 impl App {
-    const DEFAULT_WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 720.0);
-
-    fn new(opt: Opt) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(opt: Opt) -> Result<Self, Error> {
         let path = match opt.input_path.as_ref() {
             Some(path) => Some(std::borrow::Cow::Borrowed(path)),
             None => pick_file().map(std::borrow::Cow::Owned),
         };
-        let (movie, movie_url) = if let Some(path) = path {
-            let movie_url = parse_url(&path)?;
-            let movie = load_movie(&movie_url, &opt)?;
-            (Some(movie), Some(movie_url))
+        let movie_url = if let Some(path) = path {
+            Some(parse_url(&path).context("Couldn't load specified path")?)
         } else {
-            shutdown(&Ok(()));
+            shutdown();
             std::process::exit(0);
         };
 
         let icon_bytes = include_bytes!("../assets/favicon-32.rgba");
-        let icon = Icon::from_rgba(icon_bytes.to_vec(), 32, 32)?;
+        let icon =
+            Icon::from_rgba(icon_bytes.to_vec(), 32, 32).context("Couldn't load app icon")?;
 
         let event_loop: EventLoop<RuffleEvent> = EventLoop::with_user_event();
 
-        let (title, movie_size) = if let (Some(movie), Some(movie_url)) = (&movie, &movie_url) {
+        let title = if let Some(movie_url) = &movie_url {
             let filename = movie_url
                 .path_segments()
                 .and_then(|segments| segments.last())
                 .unwrap_or_else(|| movie_url.as_str());
 
-            (
-                format!("Ruffle - {}", filename),
-                LogicalSize::new(movie.width().to_pixels(), movie.height().to_pixels()),
-            )
+            format!("Ruffle - {}", filename)
         } else {
-            ("Ruffle".into(), Self::DEFAULT_WINDOW_SIZE)
-        };
-
-        let window_size: Size = if opt.width.is_none() && opt.height.is_none() {
-            movie_size.into()
-        } else {
-            let window_width = opt
-                .width
-                .unwrap_or(
-                    movie_size.width
-                        * (opt.height.unwrap_or(movie_size.height) / movie_size.height),
-                )
-                .max(1.0);
-            let window_height = opt
-                .height
-                .unwrap_or(
-                    movie_size.height * (opt.width.unwrap_or(movie_size.width) / movie_size.width),
-                )
-                .max(1.0);
-            PhysicalSize::new(window_width, window_height).into()
+            "Ruffle".into()
         };
 
         let window = WindowBuilder::new()
+            .with_visible(false)
             .with_title(title)
             .with_window_icon(Some(icon))
-            .with_inner_size(window_size)
             .with_max_inner_size(LogicalSize::new(i16::MAX, i16::MAX))
             .build(&event_loop)?;
 
-        let viewport_size = window.inner_size();
-        let viewport_scale_factor = window.scale_factor();
-
-        let window = Rc::new(window);
-
         let mut builder = PlayerBuilder::new();
+
         match audio::CpalAudioBackend::new() {
             Ok(audio) => builder = builder.with_audio(audio),
             Err(e) => {
                 log::error!("Unable to create audio device: {}", e);
             }
         };
+
         let (executor, channel) = GlutinAsyncExecutor::new(event_loop.create_proxy());
         let navigator = navigator::ExternalNavigatorBackend::new(
-            movie_url.unwrap(),
+            movie_url.as_ref().unwrap().to_owned(),
             channel,
             event_loop.create_proxy(),
             opt.proxy.clone(),
             opt.upgrade_to_https,
         );
+
+        let viewport_size = window.inner_size();
         let renderer = WgpuRenderBackend::for_window(
-            window.as_ref(),
+            &window,
             (viewport_size.width, viewport_size.height),
             opt.graphics.into(),
             opt.power.into(),
             trace_path(&opt),
-        )?;
+        )
+        .map_err(|e| anyhow!(e.to_string()))
+        .context("Couldn't create wgpu rendering backend")?;
+
+        let window = Rc::new(window);
+
+        if cfg!(feature = "software_video") {
+            builder =
+                builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+        }
+
         builder = builder
             .with_navigator(navigator)
             .with_renderer(renderer)
             .with_storage(storage::DiskStorageBackend::new())
             .with_ui(ui::DesktopUiBackend::new(window.clone()))
-            .with_software_video()
             .with_autoplay(true)
             .with_letterbox(Letterbox::On)
             .with_warn_on_unsupported_content(!opt.dont_warn_on_unsupported_content)
-            .with_viewport_dimensions(
-                viewport_size.width,
-                viewport_size.height,
-                viewport_scale_factor,
+            .with_fullscreen(opt.fullscreen);
+
+        let player = builder.build();
+
+        if let Some(movie_url) = movie_url {
+            let event_loop_proxy = event_loop.create_proxy();
+            let on_metadata = move |swf_header: &ruffle_core::swf::HeaderExt| {
+                let _ = event_loop_proxy.send_event(RuffleEvent::OnMetadata(swf_header.clone()));
+            };
+
+            player.lock().unwrap().fetch_root_movie(
+                movie_url.to_string(),
+                parse_parameters(&opt).collect(),
+                Box::new(on_metadata),
             );
 
-        let loaded = if let Some(movie) = movie {
-            builder = builder.with_movie(movie);
-            true
-        } else {
-            false
-        };
-        let player = builder.build();
+            CALLSTACK.with(|callstack| {
+                *callstack.borrow_mut() = Some(player.lock().unwrap().callstack());
+            })
+        }
 
         Ok(Self {
             opt,
@@ -284,42 +294,33 @@ impl App {
             event_loop,
             executor,
             player,
-            loaded,
         })
     }
 
     fn run(self) -> ! {
+        let mut loaded = false;
         let mut mouse_pos = PhysicalPosition::new(0.0, 0.0);
         let mut time = Instant::now();
         let mut next_frame_time = Instant::now();
         let mut minimized = false;
         let mut fullscreen_down = false;
 
-        // Poll UI events
+        // Poll UI events.
         self.event_loop
             .run(move |event, _window_target, control_flow| {
-                if !self.loaded {
-                    *control_flow = ControlFlow::Wait;
-                }
-
-                // Allow KeyboardInput.modifiers (ModifiersChanged event not functional yet).
-                #[allow(deprecated)]
-                match &event {
-                    winit::event::Event::LoopDestroyed => {
-                        self.player.lock().unwrap().flush_shared_objects();
-                        shutdown(&Ok(()));
-                        return;
-                    }
-                    winit::event::Event::WindowEvent { event, .. } => match event {
-                        WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                        WindowEvent::KeyboardInput {
-                            input:
-                                KeyboardInput {
-                                    state: ElementState::Pressed,
-                                    virtual_keycode: Some(VirtualKeyCode::Return),
-                                    modifiers,
-                                    ..
-                                },
+                // Handle fullscreen keyboard shortcuts: Alt+Return, Escape.
+                if let winit::event::Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput { input, .. },
+                    ..
+                } = &event
+                {
+                    // Allow KeyboardInput.modifiers (ModifiersChanged event not functional yet).
+                    #[allow(deprecated)]
+                    match input {
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(VirtualKeyCode::Return),
+                            modifiers,
                             ..
                         } if modifiers.alt() => {
                             if !fullscreen_down {
@@ -330,42 +331,33 @@ impl App {
                             fullscreen_down = true;
                             return;
                         }
-                        WindowEvent::KeyboardInput {
-                            input:
-                                KeyboardInput {
-                                    state: ElementState::Released,
-                                    virtual_keycode: Some(VirtualKeyCode::Return),
-                                    ..
-                                },
+                        KeyboardInput {
+                            state: ElementState::Released,
+                            virtual_keycode: Some(VirtualKeyCode::Return),
                             ..
                         } if fullscreen_down => {
                             fullscreen_down = false;
                         }
-                        WindowEvent::KeyboardInput {
-                            input:
-                                KeyboardInput {
-                                    state: ElementState::Pressed,
-                                    virtual_keycode: Some(VirtualKeyCode::Escape),
-                                    ..
-                                },
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
                             ..
                         } => self.player.lock().unwrap().update(|uc| {
                             uc.stage.set_display_state(uc, StageDisplayState::Normal);
                         }),
                         _ => (),
-                    },
-                    _ => (),
+                    }
                 }
 
-                if !self.loaded {
-                    return;
-                }
-
-                // Allow KeyboardInput.modifiers (ModifiersChanged event not functional yet).
-                #[allow(deprecated)]
                 match event {
+                    winit::event::Event::LoopDestroyed => {
+                        self.player.lock().unwrap().flush_shared_objects();
+                        shutdown();
+                        return;
+                    }
+
                     // Core loop
-                    winit::event::Event::MainEventsCleared => {
+                    winit::event::Event::MainEventsCleared if loaded => {
                         let new_time = Instant::now();
                         let dt = new_time.duration_since(time).as_micros();
                         if dt > 0 {
@@ -388,20 +380,21 @@ impl App {
                     }
 
                     winit::event::Event::WindowEvent { event, .. } => match event {
+                        WindowEvent::CloseRequested => {
+                            *control_flow = ControlFlow::Exit;
+                            return;
+                        }
                         WindowEvent::Resized(size) => {
                             // TODO: Change this when winit adds a `Window::minimzed` or `WindowEvent::Minimize`.
                             minimized = size.width == 0 && size.height == 0;
 
                             let viewport_scale_factor = self.window.scale_factor();
                             let mut player_lock = self.player.lock().unwrap();
-                            player_lock.set_viewport_dimensions(
-                                size.width,
-                                size.height,
-                                viewport_scale_factor,
-                            );
-                            player_lock
-                                .renderer_mut()
-                                .set_viewport_dimensions(size.width, size.height);
+                            player_lock.set_viewport_dimensions(ViewportDimensions {
+                                width: size.width,
+                                height: size.height,
+                                scale_factor: viewport_scale_factor,
+                            });
                             self.window.request_redraw();
                         }
                         WindowEvent::CursorMoved { position, .. } => {
@@ -458,6 +451,8 @@ impl App {
                                 self.window.request_redraw();
                             }
                         }
+                        // Allow KeyboardInput.modifiers (ModifiersChanged event not functional yet).
+                        #[allow(deprecated)]
                         WindowEvent::KeyboardInput { input, .. } => {
                             let mut player_lock = self.player.lock().unwrap();
                             if let Some(key) = input.virtual_keycode {
@@ -495,13 +490,59 @@ impl App {
                         .lock()
                         .expect("active executor reference")
                         .poll_all(),
+                    winit::event::Event::UserEvent(RuffleEvent::OnMetadata(swf_header)) => {
+                        // TODO: Re-use `SwfMovie::width` and `SwfMovie::height`.
+                        let movie_width = (swf_header.stage_size().x_max
+                            - swf_header.stage_size().x_min)
+                            .to_pixels();
+                        let movie_height = (swf_header.stage_size().y_max
+                            - swf_header.stage_size().y_min)
+                            .to_pixels();
+
+                        let window_size: Size = match (self.opt.width, self.opt.height) {
+                            (None, None) => LogicalSize::new(movie_width, movie_height).into(),
+                            (Some(width), None) => {
+                                let scale = width / movie_width;
+                                let height = movie_height * scale;
+                                PhysicalSize::new(width.max(1.0), height.max(1.0)).into()
+                            }
+                            (None, Some(height)) => {
+                                let scale = height / movie_height;
+                                let width = movie_width * scale;
+                                PhysicalSize::new(width.max(1.0), height.max(1.0)).into()
+                            }
+                            (Some(width), Some(height)) => {
+                                PhysicalSize::new(width.max(1.0), height.max(1.0)).into()
+                            }
+                        };
+                        self.window.set_inner_size(window_size);
+                        self.window.set_fullscreen(if self.opt.fullscreen {
+                            Some(Fullscreen::Borderless(None))
+                        } else {
+                            None
+                        });
+                        self.window.set_visible(true);
+
+                        let viewport_size = self.window.inner_size();
+                        let viewport_scale_factor = self.window.scale_factor();
+                        let mut player_lock = self.player.lock().unwrap();
+                        player_lock.set_viewport_dimensions(ViewportDimensions {
+                            width: viewport_size.width,
+                            height: viewport_size.height,
+                            scale_factor: viewport_scale_factor,
+                        });
+
+                        loaded = true;
+                    }
                     _ => (),
                 }
 
                 // After polling events, sleep the event loop until the next event or the next frame.
-                if *control_flow != ControlFlow::Exit {
-                    *control_flow = ControlFlow::WaitUntil(next_frame_time);
-                }
+                *control_flow = if loaded {
+                    ControlFlow::WaitUntil(next_frame_time)
+                } else {
+                    ControlFlow::Wait
+                };
             });
     }
 }
@@ -724,13 +765,13 @@ fn winit_key_to_char(key_code: VirtualKeyCode, is_shift_down: bool) -> Option<ch
     })
 }
 
-fn run_timedemo(opt: Opt) -> Result<(), Box<dyn std::error::Error>> {
+fn run_timedemo(opt: Opt) -> Result<(), Error> {
     let path = opt
         .input_path
         .as_ref()
-        .ok_or("Input file necessary for timedemo")?;
+        .ok_or_else(|| anyhow!("Input file necessary for timedemo"))?;
     let movie_url = parse_url(path)?;
-    let movie = load_movie(&movie_url, &opt)?;
+    let movie = load_movie(&movie_url, &opt).context("Couldn't load movie")?;
     let movie_frames = Some(movie.num_frames());
 
     let viewport_width = 1920;
@@ -742,10 +783,18 @@ fn run_timedemo(opt: Opt) -> Result<(), Box<dyn std::error::Error>> {
         opt.graphics.into(),
         opt.power.into(),
         trace_path(&opt),
-    )?;
-    let player = PlayerBuilder::new()
+    )
+    .map_err(|e| anyhow!(e.to_string()))
+    .context("Couldn't create wgpu rendering backend")?;
+
+    let mut builder = PlayerBuilder::new();
+
+    if cfg!(feature = "software_video") {
+        builder = builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+    }
+
+    let player = builder
         .with_renderer(renderer)
-        .with_software_video()
         .with_movie(movie)
         .with_viewport_dimensions(viewport_width, viewport_height, viewport_scale_factor)
         .with_autoplay(true)
@@ -781,14 +830,24 @@ fn init() {
         AttachConsole(ATTACH_PARENT_PROCESS);
     }
 
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev_hook(info);
+        panic_hook();
+    }));
+
     env_logger::init();
 }
 
-fn shutdown(result: &Result<(), Box<dyn std::error::Error>>) {
-    if let Err(e) = result {
-        eprintln!("Fatal error:\n{}", e);
-    }
+fn panic_hook() {
+    CALLSTACK.with(|callstack| {
+        if let Some(callstack) = &*callstack.borrow() {
+            callstack.avm2(|callstack| println!("AVM2 stack trace: {}", callstack))
+        }
+    });
+}
 
+fn shutdown() {
     // Without explicitly detaching the console cmd won't redraw it's prompt.
     #[cfg(windows)]
     unsafe {
@@ -796,7 +855,7 @@ fn shutdown(result: &Result<(), Box<dyn std::error::Error>>) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Error> {
     init();
     let opt = Opt::parse();
     let result = if opt.timedemo {
@@ -804,6 +863,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         App::new(opt).map(|app| app.run())
     };
-    shutdown(&result);
+    shutdown();
     result
 }

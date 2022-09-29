@@ -129,7 +129,7 @@ impl<'gc> Value<'gc> {
         !matches!(self, Value::Object(_))
     }
 
-    /// ECMA-262 2nd edtion s. 9.3 ToNumber (after calling `to_primitive_num`)
+    /// ECMA-262 2nd edition s. 9.3 ToNumber (after calling `to_primitive_num`)
     ///
     /// Flash diverges from spec in a number of ways. These ways are, as far as
     /// we are aware, version-gated:
@@ -137,62 +137,20 @@ impl<'gc> Value<'gc> {
     /// * In SWF6 and lower, `undefined` is coerced to `0.0` (like `false`)
     /// rather than `NaN` as required by spec.
     /// * In SWF5 and lower, hexadecimal is unsupported.
+    /// * In SWF4 and lower, `0.0` is returned rather than `NaN` if a string cannot
+    /// be converted to a number.
     fn primitive_as_number(&self, activation: &mut Activation<'_, 'gc, '_>) -> f64 {
-        let v = match self {
-            Value::Undefined if activation.swf_version() < 7 => return 0.0,
-            Value::Null if activation.swf_version() < 7 => return 0.0,
-            Value::Object(_) if activation.swf_version() < 5 => return 0.0,
-            Value::String(v) if activation.swf_version() < 5 => {
-                use crate::avm1::globals::parse_float_impl;
-                let result = parse_float_impl(v.trim_start(), true);
-                if result.is_nan() {
-                    return 0.0;
-                }
-                return result;
-            }
-            Value::Undefined => return f64::NAN,
-            Value::Null => return f64::NAN,
-            Value::Bool(false) => return 0.0,
-            Value::Bool(true) => return 1.0,
-            Value::Number(v) => return *v,
-            Value::Object(_) => return f64::NAN,
-            Value::String(v) => v,
-        };
-
-        if v.is_empty() {
-            return f64::NAN;
-        }
-
-        if activation.swf_version() >= 6 {
-            if let Some(v) = v.strip_prefix(WStr::from_units(b"0x")) {
-                // Flash allows the '-' sign here.
-                return match Wrapping::<i32>::from_wstr_radix(v, 16) {
-                    Ok(n) => f64::from(n.0 as i32),
-                    Err(_) => f64::NAN,
-                };
-            } else if v.starts_with(b'0')
-                || v.starts_with(WStr::from_units(b"+0"))
-                || v.starts_with(WStr::from_units(b"-0"))
-            {
-                // Flash allows the '-' sign here.
-                if let Ok(n) = Wrapping::<i32>::from_wstr_radix(v, 8) {
-                    return f64::from(n.0);
-                }
-            }
-        }
-
-        // Rust parses "inf" and "+inf" into Infinity, but Flash doesn't.
-        // (as of nightly 4/13, Rust also accepts "infinity")
-        // Check if the string starts with 'i' (ignoring any leading +/-).
-        if v.strip_prefix(&b"+-"[..])
-            .unwrap_or(v)
-            .starts_with(&b"iI"[..])
-        {
-            f64::NAN
-        } else {
-            v.trim_start_matches(&b"\t\n\r "[..])
-                .parse()
-                .unwrap_or(f64::NAN)
+        match self {
+            Value::Undefined if activation.swf_version() < 7 => 0.0,
+            Value::Null if activation.swf_version() < 7 => 0.0,
+            Value::Object(_) if activation.swf_version() < 5 => 0.0,
+            Value::Undefined => f64::NAN,
+            Value::Null => f64::NAN,
+            Value::Bool(false) => 0.0,
+            Value::Bool(true) => 1.0,
+            Value::Number(v) => *v,
+            Value::Object(_) => f64::NAN,
+            Value::String(v) => string_to_f64(v, activation.swf_version()),
         }
     }
 
@@ -366,20 +324,6 @@ impl<'gc> Value<'gc> {
         Ok(result)
     }
 
-    /// Converts a bool value into the appropriate value for the platform.
-    /// This should be used when pushing a bool onto the stack.
-    /// This handles SWFv4 pushing a Number, 0 or 1.
-    pub fn from_bool(value: bool, swf_version: u8) -> Value<'gc> {
-        // SWF version 4 did not have true bools and will push bools as 0 or 1.
-        // e.g. SWF19 p. 72:
-        // "If the numbers are equal, true is pushed to the stack for SWF 5 and later. For SWF 4, 1 is pushed to the stack."
-        if swf_version >= 5 {
-            value.into()
-        } else {
-            (value as i32).into()
-        }
-    }
-
     pub fn coerce_to_u8(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<u8, Error<'gc>> {
         self.coerce_to_f64(activation).map(f64_to_wrapping_u8)
     }
@@ -480,8 +424,8 @@ impl<'gc> Value<'gc> {
                 if swf_version >= 7 {
                     !v.is_empty()
                 } else {
-                    let num = v.parse().unwrap_or(0.0);
-                    num != 0.0
+                    let num = string_to_f64(v, swf_version);
+                    !num.is_nan() && num != 0.0
                 }
             }
             Value::Object(_) => true,
@@ -513,6 +457,32 @@ impl<'gc> Value<'gc> {
     pub fn coerce_to_object(&self, activation: &mut Activation<'_, 'gc, '_>) -> Object<'gc> {
         ValueObject::boxed(activation, self.to_owned())
     }
+}
+
+/// Calculate `value * 10^exp` through repeated multiplication or division.
+fn decimal_shift(mut value: f64, mut exp: i32) -> f64 {
+    let mut base: f64 = 10.0;
+    // The multiply and division branches are intentionally separate to match Flash's behavior.
+    if exp > 0 {
+        while exp > 0 {
+            if (exp & 1) != 0 {
+                value *= base;
+            }
+            exp >>= 1;
+            base *= base;
+        }
+    } else {
+        // Avoid overflow when `exp == i32::MIN`.
+        let mut exp = exp.unsigned_abs();
+        while exp > 0 {
+            if (exp & 1) != 0 {
+                value /= base;
+            }
+            exp >>= 1;
+            base *= base;
+        }
+    };
+    value
 }
 
 /// Converts an `f64` to a String with (hopefully) the same output as Flash AVM1.
@@ -567,31 +537,6 @@ fn f64_to_string(mut n: f64) -> Cow<'static, str> {
         const LOG10_2: f64 = 0.301029995663981; // log_10(2) value (less precise than Rust's f64::LOG10_2).
         let mut exp = f64::round(f64::from(exp_base2) * LOG10_2) as i32;
 
-        // Calculate `value * 10^exp` through repeated multiplication or division.
-        fn decimal_shift(mut value: f64, mut exp: i32) -> f64 {
-            let mut base: f64 = 10.0;
-            // The multiply and division branches are intentionally separate to match Flash's behavior.
-            if exp > 0 {
-                while exp > 0 {
-                    if (exp & 1) != 0 {
-                        value *= base;
-                    }
-                    exp >>= 1;
-                    base *= base;
-                }
-            } else {
-                exp = -exp;
-                while exp > 0 {
-                    if (exp & 1) != 0 {
-                        value /= base;
-                    }
-                    exp >>= 1;
-                    base *= base;
-                }
-            };
-            value
-        }
-
         // Shift the decimal value so that it's in the range of [0.0, 10.0).
         let mut mantissa: f64 = decimal_shift(n, -exp);
 
@@ -620,8 +565,7 @@ fn f64_to_string(mut n: f64) -> Cow<'static, str> {
                 // 1.2345e+15
                 // This case fails to push an extra 0 to handle the rounding 9.9999 -> 10, which
                 // causes the -9999999999999999.0 -> "-e+16" bug later.
-                buf.push(digit());
-                buf.push(b'.');
+                buf.extend([digit(), b'.']);
                 for _ in 0..MAX_DECIMAL_PLACES - 1 {
                     buf.push(digit());
                 }
@@ -727,6 +671,173 @@ fn f64_to_string(mut n: f64) -> Cow<'static, str> {
     }
 }
 
+/// Consumes an optional sign character.
+/// Returns whether a minus sign was consumed.
+fn parse_sign(s: &mut &WStr) -> bool {
+    if let Some(after_sign) = s.strip_prefix(b'-') {
+        *s = after_sign;
+        true
+    } else if let Some(after_sign) = s.strip_prefix(b'+') {
+        *s = after_sign;
+        false
+    } else {
+        false
+    }
+}
+
+/// Converts a `WStr` to an `f64`.
+///
+/// This function might fail for some invalid inputs, by returning `NaN`.
+///
+/// `strict` typically tells whether to behave like `Number()` or `parseFloat()`:
+/// * `strict == true` fails on trailing garbage (like `Number()`).
+/// * `strict == false` ignores trailing garbage (like `parseFloat()`).
+pub fn parse_float_impl(mut s: &WStr, strict: bool) -> f64 {
+    fn is_ascii_digit(c: u16) -> bool {
+        u8::try_from(c).map_or(false, |c| c.is_ascii_digit())
+    }
+
+    // Allow leading whitespace.
+    s = s.trim_start();
+
+    // Parse sign.
+    let is_negative = parse_sign(&mut s);
+    let after_sign = s;
+
+    // Validate digits before decimal point.
+    s = s.trim_start_matches(is_ascii_digit);
+    let mut exp = (after_sign.len() - s.len()) as i32 - 1;
+
+    // Validate digits after decimal point.
+    if let Some(after_dot) = s.strip_prefix(b'.') {
+        s = after_dot;
+        s = s.trim_start_matches(is_ascii_digit);
+    }
+
+    // Fail if we got no digits.
+    // TODO: Compare by reference instead?
+    if s.len() == after_sign.len() {
+        return f64::NAN;
+    }
+
+    // Handle exponent.
+    if let Some(after_e) = s.strip_prefix(b"eE".as_ref()) {
+        s = after_e;
+
+        // Parse exponent sign.
+        let exponent_is_negative = parse_sign(&mut s);
+
+        // Parse exponent itself.
+        let mut exponent: i32 = 0;
+        s = s.trim_start_matches(|c| {
+            match u8::try_from(c)
+                .ok()
+                .and_then(|c| char::from(c).to_digit(10))
+            {
+                Some(digit) => {
+                    exponent = exponent.wrapping_mul(10);
+                    exponent = exponent.wrapping_add(digit as i32);
+                    true
+                }
+                None => false,
+            }
+        });
+
+        // Apply exponent sign.
+        if exponent_is_negative {
+            exponent = exponent.wrapping_neg();
+        }
+
+        exp = exp.wrapping_add(exponent);
+    }
+
+    // Fail if we got digits, but we're in strict mode and not at end of string.
+    if strict && !s.is_empty() {
+        return f64::NAN;
+    }
+
+    // Finally, calculate the result.
+    let mut result = 0.0;
+    for c in after_sign {
+        if let Some(digit) = u8::try_from(c)
+            .ok()
+            .and_then(|c| char::from(c).to_digit(10))
+        {
+            result += decimal_shift(digit.into(), exp);
+            exp = exp.wrapping_sub(1);
+        } else if c == b'.' as u16 {
+            // Allow multiple dots.
+        } else {
+            break;
+        }
+    }
+
+    // Apply sign.
+    if is_negative {
+        result = -result;
+    }
+
+    // We shouldn't return `NaN` after a successful parsing.
+    debug_assert!(!result.is_nan());
+    result
+}
+
+/// Guess the radix of a string.
+///
+/// With an optional leading sign omitted:
+/// * Strings that start with `0x` (case insensitive) are considered hexadecimal.
+/// * Strings that start with a `0` and consist only of `0..=7` digits are considered octal.
+/// * All other strings are considered decimal.
+fn guess_radix(s: &WStr) -> u32 {
+    // Optionally skip sign.
+    let s = s.strip_prefix(b"+-".as_ref()).unwrap_or(s);
+
+    if let Some(s) = s.strip_prefix(b'0') {
+        if s.starts_with(b"xX".as_ref()) {
+            // Hexadecimal.
+            return 16;
+        }
+
+        if s.iter().all(|c| c >= b'0' as u16 && c <= b'7' as u16) {
+            // Octal.
+            return 8;
+        }
+    }
+
+    // Decimal.
+    10
+}
+
+/// Converts a `WStr` to an `f64` based on the SWF version.
+fn string_to_f64(mut s: &WStr, swf_version: u8) -> f64 {
+    if swf_version >= 6 {
+        let radix = guess_radix(s);
+
+        // Parse hexadecimal and octal numbers as integers.
+        if radix != 10 {
+            if radix == 16 {
+                // Bug compatibility: Flash fails to skip an hexadecimal prefix with a sign,
+                // causing such strings to be parsed as `NaN`.
+                s = &s[2..];
+            }
+
+            return match Wrapping::<i32>::from_wstr_radix(s, radix) {
+                Ok(result) => result.0.into(),
+                Err(_) => f64::NAN,
+            };
+        }
+    }
+
+    let strict = swf_version >= 5;
+    let result = parse_float_impl(s, strict);
+    if !strict && result.is_nan() {
+        // In non-strict mode, return `0.0` rather than `NaN`.
+        0.0
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unreadable_literal)] // Large numeric literals in tests
 mod test {
@@ -777,7 +888,7 @@ mod test {
                 protos.function,
             );
 
-            let o = ScriptObject::object_cell(activation.context.gc_context, Some(protos.object));
+            let o = ScriptObject::new(activation.context.gc_context, Some(protos.object));
             o.define_value(
                 activation.context.gc_context,
                 "valueOf",
@@ -786,7 +897,7 @@ mod test {
             );
 
             assert_eq!(
-                Value::Object(o).to_primitive_num(activation).unwrap(),
+                Value::from(o).to_primitive_num(activation).unwrap(),
                 5.into()
             );
 
@@ -808,9 +919,9 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert!(n.coerce_to_f64(activation).unwrap().is_nan());
 
-            let bo = Value::Object(ScriptObject::bare_object(activation.context.gc_context).into());
+            let o = ScriptObject::new(activation.context.gc_context, None);
 
-            assert!(bo.coerce_to_f64(activation).unwrap().is_nan());
+            assert!(Value::from(o).coerce_to_f64(activation).unwrap().is_nan());
 
             Ok(())
         });
@@ -830,9 +941,9 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert_eq!(n.coerce_to_f64(activation).unwrap(), 0.0);
 
-            let bo = Value::Object(ScriptObject::bare_object(activation.context.gc_context).into());
+            let o = ScriptObject::new(activation.context.gc_context, None);
 
-            assert_eq!(bo.coerce_to_f64(activation).unwrap(), 0.0);
+            assert_eq!(Value::from(o).coerce_to_f64(activation).unwrap(), 0.0);
 
             Ok(())
         });

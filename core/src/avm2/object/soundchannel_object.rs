@@ -12,10 +12,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates SoundChannel objects.
 pub fn soundchannel_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+) -> Result<Object<'gc>, Error<'gc>> {
+    let base = ScriptObjectData::new(class);
 
     Ok(SoundChannelObject(GcCell::allocate(
         activation.context.gc_context,
@@ -51,10 +50,9 @@ impl<'gc> SoundChannelObject<'gc> {
     pub fn from_sound_instance(
         activation: &mut Activation<'_, 'gc, '_>,
         sound: SoundInstanceHandle,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<'gc>> {
         let class = activation.avm2().classes().soundchannel;
-        let proto = class.prototype();
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut sound_object = SoundChannelObject(GcCell::allocate(
             activation.context.gc_context,
@@ -96,7 +94,7 @@ impl<'gc> TObject<'gc> for SoundChannelObject<'gc> {
         RefMut::map(self.0.write(mc), |write| &mut write.base)
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Object::from(*self).into())
     }
 

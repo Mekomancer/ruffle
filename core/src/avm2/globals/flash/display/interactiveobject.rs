@@ -3,10 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::display_object::{TDisplayObject, TInteractiveObject};
 use gc_arena::{GcCell, MutationContext};
 
@@ -15,7 +17,7 @@ pub fn instance_init<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Err("You cannot directly construct InteractiveObject.".into())
 }
 
@@ -24,7 +26,7 @@ pub fn native_instance_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
     }
@@ -37,7 +39,7 @@ pub fn class_init<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
@@ -46,7 +48,7 @@ pub fn mouse_enabled<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
@@ -62,7 +64,7 @@ pub fn set_mouse_enabled<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
@@ -83,7 +85,7 @@ pub fn double_click_enabled<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
@@ -99,7 +101,7 @@ pub fn set_double_click_enabled<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
@@ -120,7 +122,7 @@ fn context_menu<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
@@ -136,12 +138,13 @@ fn set_context_menu<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(int) = this
         .and_then(|t| t.as_display_object())
         .and_then(|dobj| dobj.as_interactive())
     {
-        let cls = activation.avm2().classes().nativemenu;
+        let cls_name = Multiname::new(Namespace::package("flash.display"), "NativeMenu");
+        let cls = activation.resolve_class(&cls_name)?;
         let value = args
             .get(0)
             .cloned()
@@ -157,7 +160,10 @@ fn set_context_menu<'gc>(
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::package("flash.display"), "InteractiveObject"),
-        Some(QName::new(Namespace::package("flash.display"), "DisplayObject").into()),
+        Some(Multiname::new(
+            Namespace::package("flash.display"),
+            "DisplayObject",
+        )),
         Method::from_builtin(
             instance_init,
             "<InteractiveObject instance initializer>",

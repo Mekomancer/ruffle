@@ -107,19 +107,19 @@ pub enum Action<'a> {
     Unknown(Unknown<'a>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConstantPool<'a> {
     pub strings: Vec<&'a SwfStr>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefineFunction<'a> {
     pub name: &'a SwfStr,
     pub params: Vec<&'a SwfStr>,
     pub actions: &'a [u8],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefineFunction2<'a> {
     pub name: &'a SwfStr,
     pub register_count: u8,
@@ -143,13 +143,13 @@ impl<'a> From<DefineFunction<'a>> for DefineFunction2<'a> {
             name: function.name,
             register_count: 0,
             params,
-            flags: FunctionFlags::default(),
+            flags: FunctionFlags::empty(),
             actions: function.actions,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionParam<'a> {
     pub name: &'a SwfStr,
     pub register_index: Option<NonZeroU8>,
@@ -169,19 +169,13 @@ bitflags! {
     }
 }
 
-impl Default for FunctionFlags {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetUrl<'a> {
     pub url: &'a SwfStr,
     pub target: &'a SwfStr,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetUrl2(pub(crate) GetUrlFlags);
 
 impl GetUrl2 {
@@ -253,7 +247,7 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SendVarsMethod {
     None = 0,
@@ -261,28 +255,28 @@ pub enum SendVarsMethod {
     Post = 2,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GotoFrame {
     pub frame: u16,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GotoFrame2 {
     pub set_playing: bool,
     pub scene_offset: u16,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GotoLabel<'a> {
     pub label: &'a SwfStr,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct If {
     pub offset: i16,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Jump {
     pub offset: i16,
 }
@@ -305,24 +299,24 @@ pub enum Value<'a> {
     ConstantPool(u16),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetTarget<'a> {
     pub target: &'a SwfStr,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoreRegister {
     pub register: u8,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Try<'a> {
     pub try_body: &'a [u8],
     pub catch_body: Option<(CatchVar<'a>, &'a [u8])>,
     pub finally_body: Option<&'a [u8]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatchVar<'a> {
     Var(&'a SwfStr),
     Register(u8),
@@ -336,23 +330,23 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitForFrame {
     pub frame: u16,
     pub num_actions_to_skip: u8,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitForFrame2 {
     pub num_actions_to_skip: u8,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct With<'a> {
     pub actions: &'a [u8],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unknown<'a> {
     pub opcode: u8,
     pub data: &'a [u8],

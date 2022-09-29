@@ -1,9 +1,11 @@
 //! Navigator backend for web
 
 use crate::custom_event::RuffleEvent;
-use isahc::{config::RedirectPolicy, prelude::*, AsyncReadResponseExt, HttpClient, Request};
+use isahc::{
+    config::RedirectPolicy, prelude::*, AsyncReadResponseExt, HttpClient, Request as IsahcRequest,
+};
 use ruffle_core::backend::navigator::{
-    NavigationMethod, NavigatorBackend, OwnedFuture, RequestOptions, Response,
+    NavigationMethod, NavigatorBackend, OwnedFuture, Request, Response,
 };
 use ruffle_core::indexmap::IndexMap;
 use ruffle_core::loader::Error;
@@ -60,7 +62,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
     fn navigate_to_url(
         &self,
         url: String,
-        _window_spec: Option<String>,
+        _target: String,
         vars_method: Option<(NavigationMethod, IndexMap<String, String>)>,
     ) {
         //TODO: Should we return a result for failed opens? Does Flash care?
@@ -97,18 +99,18 @@ impl NavigatorBackend for ExternalNavigatorBackend {
 
         let processed_url = self.pre_process_url(modified_url);
 
-        match webbrowser::open(&processed_url.to_string()) {
+        match webbrowser::open(processed_url.as_ref()) {
             Ok(_output) => {}
             Err(e) => log::error!("Could not open URL {}: {}", processed_url.as_str(), e),
         };
     }
 
-    fn fetch(&self, url: &str, options: RequestOptions) -> OwnedFuture<Response, Error> {
+    fn fetch(&self, request: Request) -> OwnedFuture<Response, Error> {
         // TODO: honor sandbox type (local-with-filesystem, local-with-network, remote, ...)
-        let full_url = match self.movie_url.join(url) {
+        let full_url = match self.movie_url.join(request.url()) {
             Ok(url) => url,
             Err(e) => {
-                let msg = format!("Invalid URL {}: {}", url, e);
+                let msg = format!("Invalid URL {}: {}", request.url(), e);
                 return Box::pin(async move { Err(Error::FetchError(msg)) });
             }
         };
@@ -152,13 +154,13 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                 let client =
                     client.ok_or_else(|| Error::FetchError("Network unavailable".to_string()))?;
 
-                let request = match options.method() {
-                    NavigationMethod::Get => Request::get(processed_url.to_string()),
-                    NavigationMethod::Post => Request::post(processed_url.to_string()),
+                let isahc_request = match request.method() {
+                    NavigationMethod::Get => IsahcRequest::get(processed_url.to_string()),
+                    NavigationMethod::Post => IsahcRequest::post(processed_url.to_string()),
                 };
 
-                let (body_data, _) = options.body().clone().unwrap_or_default();
-                let body = request
+                let (body_data, _) = request.body().clone().unwrap_or_default();
+                let body = isahc_request
                     .body(body_data)
                     .map_err(|e| Error::FetchError(e.to_string()))?;
 

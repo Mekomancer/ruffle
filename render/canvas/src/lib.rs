@@ -1,41 +1,63 @@
-use ruffle_core::backend::render::{
-    swf, Bitmap, BitmapFormat, BitmapHandle, BitmapInfo, BitmapSource, Color, NullBitmapSource,
-    RenderBackend, ShapeHandle, Transform,
-};
-use ruffle_core::color_transform::ColorTransform;
-use ruffle_core::matrix::Matrix;
-use ruffle_core::shape_utils::{DistilledShape, DrawCommand};
+use fnv::FnvHashMap;
+use ruffle_render::backend::null::NullBitmapSource;
+use ruffle_render::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
+use ruffle_render::bitmap::{Bitmap, BitmapFormat, BitmapHandle, BitmapSource};
+use ruffle_render::color_transform::ColorTransform;
+use ruffle_render::commands::{CommandHandler, CommandList};
+use ruffle_render::error::Error;
+use ruffle_render::matrix::Matrix;
+use ruffle_render::shape_utils::{DistilledShape, DrawCommand, LineScaleMode, LineScales};
+use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
-use wasm_bindgen::{Clamped, JsCast};
+use swf::{BlendMode, Color};
+use wasm_bindgen::{Clamped, JsCast, JsValue};
 use web_sys::{
     CanvasGradient, CanvasPattern, CanvasRenderingContext2d, CanvasWindingRule, DomMatrix, Element,
-    HtmlCanvasElement, ImageData, Path2d, SvgsvgElement,
+    HtmlCanvasElement, ImageData, Path2d,
 };
 
 const GRADIENT_TRANSFORM_THRESHOLD: f32 = 0.0001;
 
-type Error = Box<dyn std::error::Error>;
-
 pub struct WebCanvasRenderBackend {
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
-    root_canvas: HtmlCanvasElement,
-    render_targets: Vec<(HtmlCanvasElement, CanvasRenderingContext2d)>,
-    cur_render_target: usize,
     color_matrix: Element,
     shapes: Vec<ShapeData>,
-    bitmaps: Vec<BitmapData>,
+    bitmaps: FnvHashMap<BitmapHandle, BitmapData>,
     viewport_width: u32,
     viewport_height: u32,
-    use_color_transform_hack: bool,
-    pixelated_property_value: &'static str,
-    deactivating_mask: bool,
+    rect: Path2d,
+    mask_state: MaskState,
+    next_bitmap_handle: BitmapHandle,
+    blend_modes: Vec<BlendMode>,
+
+    // This is currnetly unused - we just store it to report
+    // in `get_viewport_dimensions`
+    viewport_scale_factor: f64,
 }
 
 /// Canvas-drawable shape data extracted from an SWF file.
 struct ShapeData(Vec<CanvasDrawCommand>);
 
 struct CanvasColor(String, u8, u8, u8, u8);
+
+impl From<&Color> for CanvasColor {
+    fn from(color: &Color) -> CanvasColor {
+        CanvasColor(
+            format!(
+                "rgba({},{},{},{})",
+                color.r,
+                color.g,
+                color.b,
+                f32::from(color.a) / 255.0
+            ),
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        )
+    }
+}
 
 impl CanvasColor {
     /// Apply a color transformation to this color.
@@ -56,10 +78,11 @@ enum CanvasDrawCommand {
     Stroke {
         path: Path2d,
         line_width: f64,
-        stroke_style: CanvasFillStyle,
+        stroke_style: CanvasStrokeStyle,
         line_cap: String,
         line_join: String,
         miter_limit: f64,
+        scale_mode: LineScaleMode,
     },
 
     /// A command to fill a path with a given style.
@@ -69,39 +92,67 @@ enum CanvasDrawCommand {
     },
 }
 
+/// Fill style for a canvas path.
 enum CanvasFillStyle {
     Color(CanvasColor),
-    Gradient(CanvasGradient),
-    TransformedGradient(TransformedGradient),
-    Pattern(CanvasPattern, bool),
+    Gradient(Gradient),
+    Bitmap(CanvasBitmap),
 }
 
-struct TransformedGradient {
+struct Gradient {
     gradient: CanvasGradient,
-    gradient_matrix: [f64; 6],
-    inverse_gradient_matrix: DomMatrix,
+    transform: Option<GradientTransform>,
 }
 
-/// Stores the actual bitmap data on the browser side.
-struct BitmapDataStorage {
+/// A "complex" gradient transform, such as elliptical or skewed gradients.
+///
+/// Canvas does not provide an API for arbitrary gradient transforms, so we cheat by applying the
+/// inverse of the gradient transform to the path, and then drawing the path with the gradient transform.
+/// This results in an non-transformed shape with a transformed gradient.
+struct GradientTransform {
+    matrix: [f64; 6],
+    inverse_matrix: DomMatrix,
+}
+
+/// Stroke style for a canvas path.
+///
+/// Gradients are handled differently for strokes vs. fills.
+enum CanvasStrokeStyle {
+    Color(CanvasColor),
+    Gradient(swf::Gradient, Option<f64>),
+    Bitmap(CanvasBitmap),
+}
+
+struct CanvasBitmap {
+    pattern: CanvasPattern,
+    matrix: Matrix,
+    smoothed: bool,
+}
+
+#[allow(dead_code)]
+struct BitmapData {
+    bitmap: Bitmap,
+    image_data: ImageData,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
 }
 
-impl BitmapDataStorage {
+impl BitmapData {
     /// Puts the image data into a newly created <canvas>, and caches it.
-    fn from_image_data(data: ImageData) -> Self {
+    fn new(bitmap: Bitmap) -> Result<Self, JsValue> {
+        let bitmap = bitmap.to_rgba();
+        let image_data =
+            ImageData::new_with_u8_clamped_array(Clamped(bitmap.data()), bitmap.width())
+                .into_js_result()?;
+
         let window = web_sys::window().unwrap();
         let document = window.document().unwrap();
-
         let canvas: HtmlCanvasElement = document
             .create_element("canvas")
-            .unwrap()
-            .dyn_into()
-            .unwrap();
-
-        canvas.set_width(data.width());
-        canvas.set_height(data.height());
+            .into_js_result()?
+            .unchecked_into();
+        canvas.set_width(bitmap.width());
+        canvas.set_height(bitmap.height());
 
         let context: CanvasRenderingContext2d = canvas
             .get_context("2d")
@@ -109,34 +160,39 @@ impl BitmapDataStorage {
             .unwrap()
             .dyn_into()
             .unwrap();
-
-        context.put_image_data(&data, 0.0, 0.0).unwrap();
-        BitmapDataStorage { canvas, context }
+        context
+            .put_image_data(&image_data, 0.0, 0.0)
+            .into_js_result()?;
+        Ok(BitmapData {
+            bitmap,
+            image_data,
+            canvas,
+            context,
+        })
     }
-}
 
-#[allow(dead_code)]
-struct BitmapData {
-    image: BitmapDataStorage,
-    width: u32,
-    height: u32,
-}
-
-impl BitmapData {
-    pub fn get_pixels(&self) -> Option<Bitmap> {
+    fn get_pixels(&self) -> Option<Bitmap> {
         if let Ok(bitmap_pixels) =
-            self.image
-                .context
-                .get_image_data(0.0, 0.0, self.width as f64, self.height as f64)
+            self.context
+                .get_image_data(0.0, 0.0, self.width().into(), self.height().into())
         {
-            Some(Bitmap {
-                width: self.width,
-                height: self.height,
-                data: BitmapFormat::Rgba(bitmap_pixels.data().to_vec()),
-            })
+            Some(Bitmap::new(
+                self.width(),
+                self.height(),
+                BitmapFormat::Rgba,
+                bitmap_pixels.data().to_vec(),
+            ))
         } else {
             None
         }
+    }
+
+    fn width(&self) -> u32 {
+        self.bitmap.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.bitmap.height()
     }
 }
 
@@ -224,90 +280,24 @@ impl WebCanvasRenderBackend {
             .append_child(&svg)
             .map_err(|_| "append_child failed")?;
 
-        // Check if we are on Firefox to use the color transform hack.
-        // TODO: We could turn this into a general util function to detect browser
-        // type, version, OS, etc.
-        let is_firefox = window
-            .navigator()
-            .user_agent()
-            .map(|s| s.contains("Firefox"))
-            .unwrap_or(false);
+        let rect = Path2d::new().into_js_result()?;
+        rect.rect(0.0, 0.0, 1.0, 1.0);
 
-        let render_targets = vec![(canvas.clone(), context.clone())];
         let renderer = Self {
             canvas: canvas.clone(),
-            root_canvas: canvas.clone(),
-            render_targets,
-            cur_render_target: 0,
             color_matrix,
             context,
             shapes: vec![],
-            bitmaps: vec![],
+            bitmaps: Default::default(),
             viewport_width: 0,
             viewport_height: 0,
-            use_color_transform_hack: is_firefox,
-            deactivating_mask: false,
-
-            // For rendering non-smoothed bitmaps.
-            // crisp-edges works in Firefox, pixelated works in Chrome (and others)?
-            pixelated_property_value: if is_firefox {
-                "crisp-edges"
-            } else {
-                "pixelated"
-            },
+            viewport_scale_factor: 1.0,
+            rect,
+            mask_state: MaskState::DrawContent,
+            next_bitmap_handle: BitmapHandle(0),
+            blend_modes: vec![BlendMode::Normal],
         };
         Ok(renderer)
-    }
-
-    // Pushes a fresh canvas onto the stack to use as a render target.
-    fn push_render_target(&mut self) {
-        self.cur_render_target += 1;
-        if self.cur_render_target >= self.render_targets.len() {
-            // Create offscreen canvas to use as the render target.
-            let window = web_sys::window().unwrap();
-            let document = window.document().unwrap();
-            let canvas: HtmlCanvasElement = document
-                .create_element("canvas")
-                .unwrap()
-                .dyn_into()
-                .unwrap();
-            let context: CanvasRenderingContext2d = canvas
-                .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into()
-                .unwrap();
-            canvas
-                .style()
-                .set_property("display", "none")
-                .warn_on_error();
-            self.root_canvas.append_child(&canvas).warn_on_error();
-            self.render_targets.push((canvas, context));
-        }
-
-        let (canvas, context) = &self.render_targets[self.cur_render_target];
-        canvas.set_width(self.viewport_width);
-        canvas.set_height(self.viewport_height);
-        self.canvas = canvas.clone();
-        self.context = context.clone();
-        let width = self.canvas.width();
-        let height = self.canvas.height();
-        self.context
-            .clear_rect(0.0, 0.0, width.into(), height.into());
-    }
-
-    fn pop_render_target(&mut self) -> (HtmlCanvasElement, CanvasRenderingContext2d) {
-        if self.cur_render_target > 0 {
-            let out = (self.canvas.clone(), self.context.clone());
-            self.cur_render_target -= 1;
-            let (canvas, context) = &self.render_targets[self.cur_render_target];
-            self.canvas = canvas.clone();
-            self.context = context.clone();
-            out
-        } else {
-            log::error!("Render target stack underflow");
-            (self.canvas.clone(), self.context.clone())
-        }
     }
 
     #[allow(clippy::float_cmp)]
@@ -344,17 +334,9 @@ impl WebCanvasRenderBackend {
             let mult = color_transform.mult_rgba_normalized();
             let add = color_transform.add_rgba_normalized();
 
-            // TODO HACK: Firefox is having issues with additive alpha in color transforms (see #38).
-            // Hack this away and just use multiplicative (not accurate in many cases, but won't look awful).
-            let (a_mult, a_add) = if self.use_color_transform_hack && color_transform.a_add != 0 {
-                (mult[3] + add[3], 0.0)
-            } else {
-                (mult[3], add[3])
-            };
-
             let matrix_str = format!(
                 "{} 0 0 0 {} 0 {} 0 0 {} 0 0 {} 0 {} 0 0 0 {} {}",
-                mult[0], add[0], mult[1], add[1], mult[2], add[2], a_mult, a_add
+                mult[0], add[0], mult[1], add[1], mult[2], add[2], mult[3], add[3]
             );
 
             self.color_matrix
@@ -371,134 +353,30 @@ impl WebCanvasRenderBackend {
         self.context.set_global_alpha(1.0);
     }
 
-    /// Puts the contents of the given Bitmap into an ImageData on the browser side,
-    /// doing the RGB to RGBA expansion if needed.
-    fn swf_bitmap_to_js_imagedata(bitmap: &mut Bitmap) -> ImageData {
-        match &bitmap.data {
-            BitmapFormat::Rgb(rgb_data) => {
-                let mut rgba_data =
-                    Vec::with_capacity(bitmap.width as usize * bitmap.height as usize * 4);
-                for rgb in rgb_data.chunks_exact(3) {
-                    rgba_data.extend_from_slice(rgb);
-                    rgba_data.push(255);
-                }
-                let image_data =
-                    ImageData::new_with_u8_clamped_array(Clamped(&rgba_data), bitmap.width)
-                        .unwrap();
-                bitmap.data = BitmapFormat::Rgba(rgba_data);
-                image_data
-            }
-            BitmapFormat::Rgba(rgba_data) => {
-                ImageData::new_with_u8_clamped_array(Clamped(&rgba_data), bitmap.width).unwrap()
-            }
-        }
-    }
-
-    fn register_bitmap_raw(&mut self, mut bitmap: Bitmap) -> Result<BitmapInfo, Error> {
-        let (width, height) = (bitmap.width, bitmap.height);
-
-        let image = Self::swf_bitmap_to_js_imagedata(&mut bitmap);
-
-        let handle = BitmapHandle(self.bitmaps.len());
-        self.bitmaps.push(BitmapData {
-            image: BitmapDataStorage::from_image_data(image),
-            width,
-            height,
-        });
-
-        Ok(BitmapInfo {
-            handle,
-            width: width.try_into().expect("Bitmap dimensions too large"),
-            height: height.try_into().expect("Bitmap dimensions too large"),
-        })
-    }
-}
-
-impl RenderBackend for WebCanvasRenderBackend {
-    fn set_viewport_dimensions(&mut self, width: u32, height: u32) {
-        self.viewport_width = width;
-        self.viewport_height = height;
-    }
-
-    fn register_shape(
-        &mut self,
-        shape: DistilledShape,
-        bitmap_source: &dyn BitmapSource,
-    ) -> ShapeHandle {
-        let handle = ShapeHandle(self.shapes.len());
-        let data = swf_shape_to_canvas_commands(
-            &shape,
-            bitmap_source,
-            &self.bitmaps,
-            self.pixelated_property_value,
-            &self.context,
-        );
-        self.shapes.push(data);
-        handle
-    }
-
-    fn replace_shape(
-        &mut self,
-        shape: DistilledShape,
-        bitmap_source: &dyn BitmapSource,
-        handle: ShapeHandle,
-    ) {
-        let data = swf_shape_to_canvas_commands(
-            &shape,
-            bitmap_source,
-            &self.bitmaps,
-            self.pixelated_property_value,
-            &self.context,
-        );
-        self.shapes[handle.0] = data;
-    }
-
-    fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
-        let shape = ruffle_core::shape_utils::swf_glyph_to_shape(glyph);
-        self.register_shape((&shape).into(), &NullBitmapSource)
-    }
-
-    fn register_bitmap_jpeg(
-        &mut self,
-        data: &[u8],
-        jpeg_tables: Option<&[u8]>,
-    ) -> Result<BitmapInfo, Error> {
-        let data = ruffle_core::backend::render::glue_tables_to_jpeg(data, jpeg_tables);
-        self.register_bitmap_jpeg_2(&data)
-    }
-
-    fn register_bitmap_jpeg_2(&mut self, data: &[u8]) -> Result<BitmapInfo, Error> {
-        let bitmap = ruffle_core::backend::render::decode_define_bits_jpeg(data, None)?;
-        self.register_bitmap_raw(bitmap)
-    }
-
-    fn register_bitmap_jpeg_3_or_4(
-        &mut self,
-        jpeg_data: &[u8],
-        alpha_data: &[u8],
-    ) -> Result<BitmapInfo, Error> {
-        let bitmap =
-            ruffle_core::backend::render::decode_define_bits_jpeg(jpeg_data, Some(alpha_data))?;
-        self.register_bitmap_raw(bitmap)
-    }
-
-    fn register_bitmap_png(
-        &mut self,
-        swf_tag: &swf::DefineBitsLossless,
-    ) -> Result<BitmapInfo, Error> {
-        let mut bitmap = ruffle_core::backend::render::decode_define_bits_lossless(swf_tag)?;
-        let image = Self::swf_bitmap_to_js_imagedata(&mut bitmap);
-        let handle = BitmapHandle(self.bitmaps.len());
-        self.bitmaps.push(BitmapData {
-            image: BitmapDataStorage::from_image_data(image),
-            width: swf_tag.width.into(),
-            height: swf_tag.height.into(),
-        });
-        Ok(BitmapInfo {
-            handle,
-            width: swf_tag.width,
-            height: swf_tag.height,
-        })
+    fn apply_blend_mode(&mut self, blend: BlendMode) {
+        // TODO: Objects with a blend mode need to be rendered to an intermediate buffer first,
+        // but for now we render each child directly to the canvas. This should look reasonable for most
+        // common cases.
+        // While canvas has built in support for most of the blend modes, a few aren't supported.
+        let mode = match blend {
+            BlendMode::Normal => "source-over",
+            BlendMode::Layer => "source-over", // Requires intermediate buffer.
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Lighten => "lighten",
+            BlendMode::Darken => "darken",
+            BlendMode::Difference => "difference",
+            BlendMode::Add => "lighter",
+            BlendMode::Subtract => "difference", // Not exposed by canvas, rendered as difference.
+            BlendMode::Invert => "source-over",  // Not exposed by canvas.
+            BlendMode::Alpha => "source-over",   // Requires intermediate buffer.
+            BlendMode::Erase => "source-over",   // Requires intermediate buffer.
+            BlendMode::Overlay => "overlay",
+            BlendMode::HardLight => "hard-light",
+        };
+        self.context
+            .set_global_composite_operation(mode)
+            .expect("Failed to update BlendMode");
     }
 
     fn begin_frame(&mut self, clear: Color) {
@@ -520,245 +398,84 @@ impl RenderBackend for WebCanvasRenderBackend {
                 .clear_rect(0.0, 0.0, width.into(), height.into());
         }
 
-        self.deactivating_mask = false;
+        self.mask_state = MaskState::DrawContent;
+    }
+}
+
+impl RenderBackend for WebCanvasRenderBackend {
+    fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
+        self.viewport_width = dimensions.width;
+        self.viewport_height = dimensions.height;
+        self.viewport_scale_factor = dimensions.scale_factor;
     }
 
-    fn end_frame(&mut self) {
-        // Noop
-    }
-
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
-        if self.deactivating_mask {
-            return;
-        }
-
-        self.context.set_image_smoothing_enabled(smoothing);
-
-        self.set_transform(&transform.matrix);
-        self.set_color_filter(transform);
-        if let Some(bitmap) = self.bitmaps.get(bitmap.0) {
-            let _ =
-                self.context
-                    .draw_image_with_html_canvas_element(&bitmap.image.canvas, 0.0, 0.0);
-        }
-        self.clear_color_filter();
-    }
-
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
-        if self.deactivating_mask {
-            return;
-        }
-
-        self.set_transform(&transform.matrix);
-        if let Some(shape) = self.shapes.get(shape.0) {
-            for command in shape.0.iter() {
-                match command {
-                    CanvasDrawCommand::Fill { path, fill_style } => match fill_style {
-                        CanvasFillStyle::Color(color) => {
-                            let color = color.color_transform(&transform.color_transform);
-                            self.context.set_fill_style(&color.0.into());
-                            self.context
-                                .fill_with_path_2d_and_winding(path, CanvasWindingRule::Evenodd);
-                        }
-                        CanvasFillStyle::Gradient(gradient) => {
-                            self.set_color_filter(&transform);
-                            self.context.set_fill_style(gradient);
-                            self.context
-                                .fill_with_path_2d_and_winding(path, CanvasWindingRule::Evenodd);
-                            self.clear_color_filter();
-                        }
-                        CanvasFillStyle::TransformedGradient(gradient) => {
-                            // Canvas has no easy way to draw gradients with an arbitrary transform,
-                            // but we can fake it by pushing the gradient's transform to the canvas,
-                            // then transforming the path itself by the inverse.
-                            self.set_color_filter(&transform);
-                            self.context.set_fill_style(&gradient.gradient);
-                            let matrix = &gradient.gradient_matrix;
-                            self.context
-                                .transform(
-                                    matrix[0], matrix[1], matrix[2], matrix[3], matrix[4],
-                                    matrix[5],
-                                )
-                                .warn_on_error();
-                            let untransformed_path = Path2d::new().unwrap();
-                            untransformed_path.add_path_with_transformation(
-                                path,
-                                gradient.inverse_gradient_matrix.unchecked_ref(),
-                            );
-                            self.context.fill_with_path_2d_and_winding(
-                                &untransformed_path,
-                                CanvasWindingRule::Evenodd,
-                            );
-                            self.context
-                                .set_transform(
-                                    transform.matrix.a.into(),
-                                    transform.matrix.b.into(),
-                                    transform.matrix.c.into(),
-                                    transform.matrix.d.into(),
-                                    transform.matrix.tx.to_pixels(),
-                                    transform.matrix.ty.to_pixels(),
-                                )
-                                .unwrap();
-                            self.clear_color_filter();
-                        }
-                        CanvasFillStyle::Pattern(patt, smoothed) => {
-                            self.set_color_filter(&transform);
-                            self.context.set_image_smoothing_enabled(*smoothed);
-                            self.context.set_fill_style(patt);
-                            self.context
-                                .fill_with_path_2d_and_winding(path, CanvasWindingRule::Evenodd);
-                            self.clear_color_filter();
-                        }
-                    },
-                    CanvasDrawCommand::Stroke {
-                        path,
-                        line_width,
-                        stroke_style,
-                        line_cap,
-                        line_join,
-                        miter_limit,
-                    } => {
-                        self.context.set_line_cap(line_cap);
-                        self.context.set_line_join(line_join);
-                        self.context.set_miter_limit(*miter_limit);
-                        self.context.set_line_width(*line_width);
-                        match stroke_style {
-                            CanvasFillStyle::Color(color) => {
-                                let color = color.color_transform(&transform.color_transform);
-                                self.context.set_stroke_style(&color.0.into());
-                                self.context.stroke_with_path(path);
-                            }
-                            CanvasFillStyle::Gradient(gradient) => {
-                                self.set_color_filter(&transform);
-                                self.context.set_stroke_style(gradient);
-                                self.context.stroke_with_path(path);
-                                self.clear_color_filter();
-                            }
-                            CanvasFillStyle::TransformedGradient(gradient) => {
-                                self.set_color_filter(&transform);
-                                self.context.set_stroke_style(&gradient.gradient);
-                                self.context.stroke_with_path(path);
-                                self.context
-                                    .set_transform(
-                                        transform.matrix.a.into(),
-                                        transform.matrix.b.into(),
-                                        transform.matrix.c.into(),
-                                        transform.matrix.d.into(),
-                                        transform.matrix.tx.to_pixels(),
-                                        transform.matrix.ty.to_pixels(),
-                                    )
-                                    .unwrap();
-                                self.clear_color_filter();
-                            }
-                            CanvasFillStyle::Pattern(patt, smoothed) => {
-                                self.context.set_image_smoothing_enabled(*smoothed);
-                                self.context.set_stroke_style(patt);
-                                self.context.stroke_with_path(path);
-                                self.clear_color_filter();
-                            }
-                        };
-                    }
-                }
-            }
+    fn viewport_dimensions(&self) -> ViewportDimensions {
+        ViewportDimensions {
+            width: self.viewport_width,
+            height: self.viewport_height,
+            scale_factor: self.viewport_scale_factor,
         }
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: &Matrix) {
-        if self.deactivating_mask {
-            return;
-        }
-
-        self.set_transform(matrix);
-        self.clear_color_filter();
-
-        self.context.set_fill_style(
-            &format!(
-                "rgba({},{},{},{})",
-                color.r,
-                color.g,
-                color.b,
-                f32::from(color.a) / 255.0
-            )
-            .into(),
-        );
-        self.context.fill_rect(0.0, 0.0, 1.0, 1.0);
-
-        self.clear_color_filter();
+    fn register_shape(
+        &mut self,
+        shape: DistilledShape,
+        bitmap_source: &dyn BitmapSource,
+    ) -> ShapeHandle {
+        let handle = ShapeHandle(self.shapes.len());
+        let data =
+            swf_shape_to_canvas_commands(&shape, bitmap_source, &self.bitmaps, &self.context);
+        self.shapes.push(data);
+        handle
     }
 
-    fn push_mask(&mut self) {
-        // In the canvas backend, masks are implemented using two render targets.
-        // We render the masker clips to the first render target.
-        self.push_render_target();
+    fn replace_shape(
+        &mut self,
+        shape: DistilledShape,
+        bitmap_source: &dyn BitmapSource,
+        handle: ShapeHandle,
+    ) {
+        let data =
+            swf_shape_to_canvas_commands(&shape, bitmap_source, &self.bitmaps, &self.context);
+        self.shapes[handle.0] = data;
     }
-    fn activate_mask(&mut self) {
-        // We render the maskee clips to the second render target.
-        self.push_render_target();
+
+    fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
+        let shape = ruffle_render::shape_utils::swf_glyph_to_shape(glyph);
+        self.register_shape((&shape).into(), &NullBitmapSource)
     }
-    fn deactivate_mask(&mut self) {
-        self.deactivating_mask = true;
+
+    fn render_offscreen(
+        &mut self,
+        _handle: BitmapHandle,
+        _width: u32,
+        _height: u32,
+        _commands: CommandList,
+        _clear_color: Color,
+    ) -> Result<Bitmap, ruffle_render::error::Error> {
+        Err(Error::Unimplemented)
     }
-    fn pop_mask(&mut self) {
-        self.deactivating_mask = false;
 
-        let (maskee_canvas, maskee_context) = self.pop_render_target();
-        let (masker_canvas, _masker_context) = self.pop_render_target();
-
-        // We have to be sure to reset the transforms here so that
-        // the texture is drawn starting from the upper-left corner.
-        maskee_context.reset_transform().warn_on_error();
-        self.context.reset_transform().warn_on_error();
-
-        // We draw the masker onto the maskee using the "destination-in" blend mode.
-        // This will filter out pixels where the maskee alpha == 0.
-        maskee_context
-            .set_global_composite_operation("destination-in")
-            .unwrap();
-
-        // Force alpha to 100% for the mask art, because Flash ignores alpha in masks.
-        // Otherwise canvas blend modes will draw the masked clip as transparent.
-        // TODO: Doesn't work on Safari because it doesn't support context.filter.
-        self.color_matrix
-            .set_attribute(
-                "values",
-                "1.0 0 0 0 0 0 1.0 0 0 0 0 0 1.0 0 0 0 0 0 256.0 0",
-            )
-            .warn_on_error();
-
-        maskee_context.set_filter("url('#_cm')");
-        maskee_context
-            .draw_image_with_html_canvas_element(&masker_canvas, 0.0, 0.0)
-            .unwrap();
-        maskee_context
-            .set_global_composite_operation("source-over")
-            .unwrap();
-        maskee_context.set_filter("none");
-
-        // Finally, we draw the finalized masked onto the main canvas.
-        self.context.reset_transform().warn_on_error();
-        self.context
-            .draw_image_with_html_canvas_element(&maskee_canvas, 0.0, 0.0)
-            .unwrap();
+    fn submit_frame(&mut self, clear: Color, commands: CommandList) {
+        self.begin_frame(clear);
+        commands.execute(self);
     }
 
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
-        let bitmap = &self.bitmaps[bitmap.0];
+        let bitmap = &self.bitmaps[&bitmap];
         bitmap.get_pixels()
     }
 
-    fn register_bitmap_raw(
-        &mut self,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
-        Ok(self
-            .register_bitmap_raw(Bitmap {
-                width,
-                height,
-                data: BitmapFormat::Rgba(rgba),
-            })?
-            .handle)
+    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
+        let handle = self.next_bitmap_handle;
+        self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
+        let bitmap_data = BitmapData::new(bitmap).map_err(Error::JavascriptError)?;
+        self.bitmaps.insert(handle, bitmap_data);
+        Ok(handle)
+    }
+
+    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) {
+        self.bitmaps.remove(&bitmap);
     }
 
     fn update_texture(
@@ -767,18 +484,299 @@ impl RenderBackend for WebCanvasRenderBackend {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
+    ) -> Result<(), Error> {
         // TODO: Could be optimized to a single put_image_data call
         // in case it is already stored as a canvas+context.
-        self.bitmaps[handle.0] = BitmapData {
-            image: BitmapDataStorage::from_image_data(
-                ImageData::new_with_u8_clamped_array(Clamped(&rgba), width).unwrap(),
-            ),
-            width,
-            height,
-        };
+        self.bitmaps.insert(
+            handle,
+            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))
+                .map_err(Error::JavascriptError)?,
+        );
+        Ok(())
+    }
+}
 
-        Ok(handle)
+impl CommandHandler for WebCanvasRenderBackend {
+    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
+        if self.mask_state == MaskState::ClearMask {
+            return;
+        }
+
+        self.context.set_image_smoothing_enabled(smoothing);
+
+        self.set_transform(&transform.matrix);
+        self.set_color_filter(transform);
+        if let Some(bitmap) = self.bitmaps.get(&bitmap) {
+            let _ = self
+                .context
+                .draw_image_with_html_canvas_element(&bitmap.canvas, 0.0, 0.0);
+        }
+        self.clear_color_filter();
+    }
+
+    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
+        match &self.mask_state {
+            MaskState::DrawContent => {
+                let mut line_scale = LineScales::new(&transform.matrix);
+                let dom_matrix = transform.matrix.to_dom_matrix();
+                let mut transform_dirty = true;
+                if let Some(shape) = self.shapes.get(shape.0) {
+                    for command in shape.0.iter() {
+                        match command {
+                            CanvasDrawCommand::Fill { path, fill_style } => {
+                                if transform_dirty {
+                                    let _ = self.context.set_transform(
+                                        transform.matrix.a.into(),
+                                        transform.matrix.b.into(),
+                                        transform.matrix.c.into(),
+                                        transform.matrix.d.into(),
+                                        transform.matrix.tx.to_pixels(),
+                                        transform.matrix.ty.to_pixels(),
+                                    );
+                                    transform_dirty = false;
+                                }
+                                match fill_style {
+                                    CanvasFillStyle::Color(color) => {
+                                        let color =
+                                            color.color_transform(&transform.color_transform);
+                                        self.context.set_fill_style(&color.0.into());
+                                        self.context.fill_with_path_2d_and_winding(
+                                            path,
+                                            CanvasWindingRule::Evenodd,
+                                        );
+                                    }
+                                    CanvasFillStyle::Gradient(gradient) => {
+                                        self.set_color_filter(transform);
+                                        self.context.set_fill_style(&gradient.gradient);
+
+                                        if let Some(gradient_transform) = &gradient.transform {
+                                            // Canvas has no easy way to draw gradients with an arbitrary transform,
+                                            // but we can fake it by pushing the gradient's transform to the canvas,
+                                            // then transforming the path itself by the inverse.
+                                            let matrix = &gradient_transform.matrix;
+                                            let _ = self.context.transform(
+                                                matrix[0], matrix[1], matrix[2], matrix[3],
+                                                matrix[4], matrix[5],
+                                            );
+                                            transform_dirty = true;
+                                            let untransformed_path = Path2d::new().unwrap();
+                                            untransformed_path.add_path_with_transformation(
+                                                path,
+                                                gradient_transform.inverse_matrix.unchecked_ref(),
+                                            );
+                                            self.context.fill_with_path_2d_and_winding(
+                                                &untransformed_path,
+                                                CanvasWindingRule::Evenodd,
+                                            );
+                                        } else {
+                                            self.context.fill_with_path_2d_and_winding(
+                                                path,
+                                                CanvasWindingRule::Evenodd,
+                                            );
+                                        }
+
+                                        self.clear_color_filter();
+                                    }
+                                    CanvasFillStyle::Bitmap(bitmap) => {
+                                        self.set_color_filter(transform);
+                                        self.context.set_image_smoothing_enabled(bitmap.smoothed);
+                                        self.context.set_fill_style(&bitmap.pattern);
+                                        self.context.fill_with_path_2d_and_winding(
+                                            path,
+                                            CanvasWindingRule::Evenodd,
+                                        );
+                                        self.clear_color_filter();
+                                    }
+                                }
+                            }
+                            CanvasDrawCommand::Stroke {
+                                path,
+                                line_width,
+                                stroke_style,
+                                line_cap,
+                                line_join,
+                                miter_limit,
+                                scale_mode,
+                            } => {
+                                // Canvas.setTransform ends up transforming the stroke geometry itself (including joins/endcaps).
+                                // Instead, reset the canvas transform, and apply the transform to the stroke path directly so
+                                // that the geometry remains untransformed.
+                                let _ = self.context.reset_transform();
+                                transform_dirty = true;
+                                let transformed_path = Path2d::new().unwrap();
+                                transformed_path
+                                    .add_path_with_transformation(path, dom_matrix.unchecked_ref());
+
+                                // Set stroke parameters.
+                                self.context.set_line_cap(line_cap);
+                                self.context.set_line_join(line_join);
+                                self.context.set_miter_limit(*miter_limit);
+                                let line_width =
+                                    line_scale.transform_width(*line_width as f32, *scale_mode);
+                                self.context.set_line_width(line_width.into());
+                                match stroke_style {
+                                    CanvasStrokeStyle::Color(color) => {
+                                        let color =
+                                            color.color_transform(&transform.color_transform);
+                                        self.context.set_stroke_style(&color.0.into());
+                                        self.context.stroke_with_path(&transformed_path);
+                                    }
+                                    CanvasStrokeStyle::Gradient(gradient, focal_point) => {
+                                        // This is the hard case -- the Canvas API provides no good way to transform gradients,
+                                        // and the inverse-transform trick used above for gradient fills can't be used here
+                                        // because it will distort the stroke geometry.
+                                        // Another possibility is to avoid the Path2D API, instead drawing using explicit path
+                                        // commands (`context.lineTo`), then push the gradient transform, and finally stroke
+                                        // the path using `stroke()`. But this will be tons of JS calls if there are many strokes.
+                                        // So let's settle for allocating a new canvas gradient that is a best-effort match of the
+                                        // the desired transform. This will not match Flash exactly, but should be relatively rare.
+                                        let mut gradient = gradient.clone();
+                                        gradient.matrix = (transform.matrix
+                                            * Matrix::from(gradient.matrix))
+                                        .into();
+                                        let gradient = match focal_point {
+                                            Some(focal_point) => create_radial_gradient(
+                                                &self.context,
+                                                &gradient,
+                                                *focal_point,
+                                                false,
+                                            ),
+                                            None => create_linear_gradient(
+                                                &self.context,
+                                                &gradient,
+                                                false,
+                                            ),
+                                        };
+                                        if let Ok(gradient) = gradient {
+                                            self.set_color_filter(transform);
+                                            self.context.set_stroke_style(&gradient.gradient);
+                                            self.context.stroke_with_path(&transformed_path);
+                                            self.clear_color_filter();
+                                        }
+                                    }
+                                    CanvasStrokeStyle::Bitmap(bitmap) => {
+                                        // Set the CanvasPattern's matrix to the concatenated transform.
+                                        let bitmap_matrix = transform.matrix
+                                            * bitmap.matrix
+                                            * Matrix::scale(0.05, 0.05);
+                                        bitmap.pattern.set_transform(
+                                            bitmap_matrix.to_dom_matrix().unchecked_ref(),
+                                        );
+                                        self.set_color_filter(transform);
+                                        self.context.set_image_smoothing_enabled(bitmap.smoothed);
+                                        self.context.set_stroke_style(&bitmap.pattern);
+                                        self.context.stroke_with_path(&transformed_path);
+                                        self.clear_color_filter();
+                                    }
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add the shape path to the mask path.
+            // Strokes are ignored.
+            MaskState::DrawMask(mask_path) => {
+                if let Some(shape) = self.shapes.get(shape.0) {
+                    for command in shape.0.iter() {
+                        if let CanvasDrawCommand::Fill { path, .. } = command {
+                            mask_path.add_path_with_transformation(
+                                path,
+                                transform.matrix.to_dom_matrix().unchecked_ref(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Canvas backend doesn't have to do anything to clear masks.
+            MaskState::ClearMask => (),
+        }
+    }
+
+    fn draw_rect(&mut self, color: Color, matrix: &Matrix) {
+        match &self.mask_state {
+            MaskState::DrawContent => {
+                self.set_transform(matrix);
+                self.clear_color_filter();
+                self.context.set_fill_style(
+                    &format!(
+                        "rgba({},{},{},{})",
+                        color.r,
+                        color.g,
+                        color.b,
+                        f32::from(color.a) / 255.0
+                    )
+                    .into(),
+                );
+                self.context.fill_rect(0.0, 0.0, 1.0, 1.0);
+            }
+            MaskState::DrawMask(mask_path) => {
+                mask_path.add_path_with_transformation(
+                    &self.rect,
+                    matrix.to_dom_matrix().unchecked_ref(),
+                );
+            }
+            MaskState::ClearMask => (),
+        }
+    }
+
+    fn push_mask(&mut self) {
+        if self.mask_state == MaskState::DrawContent {
+            // Save the current mask layer so that it can be restored when the mask is popped.
+            self.context.save();
+            self.mask_state = MaskState::DrawMask(Path2d::new().unwrap());
+        }
+    }
+
+    fn activate_mask(&mut self) {
+        if let MaskState::DrawMask(mask_path) = &self.mask_state {
+            self.context.reset_transform().unwrap();
+            // Apply the clipping path to the canvas for future draws.
+            // TODO: Canvas almost, but not completely, provides a clean way to implement Flash masks.
+            // Subsequent calls to `CanvasRenderingContext2d.clip` support nested masks (intersection),
+            // but Flash art is sometimes in layers where one path is filled on top of another (union).
+            // We use non-zero winding here to handle this case, but this will be incorrect in the
+            // other cases such as self-intersecting shapes. The Flash IDE actively avoids exporting
+            // shapes and masks for both of these cases, so it shouldn't be common.
+            // Most likely it would happen with dynamiuc masks via drawing API or similar.
+            // A possible improvement is to choose the winding rule based on whether the shape has
+            // layers or not (via a flag in DistilledShape?)
+            self.context
+                .clip_with_path_2d_and_winding(mask_path, CanvasWindingRule::Nonzero);
+            self.mask_state = MaskState::DrawContent;
+        }
+    }
+
+    fn deactivate_mask(&mut self) {
+        if self.mask_state == MaskState::DrawContent {
+            self.mask_state = MaskState::ClearMask;
+        }
+    }
+
+    fn pop_mask(&mut self) {
+        if self.mask_state == MaskState::ClearMask {
+            // Pop the previous clipping state.
+            self.context.restore();
+            self.mask_state = MaskState::DrawContent;
+        }
+    }
+
+    fn push_blend_mode(&mut self, blend: BlendMode) {
+        if Some(&blend) != self.blend_modes.last() {
+            self.apply_blend_mode(blend);
+        }
+        self.blend_modes.push(blend);
+    }
+
+    fn pop_blend_mode(&mut self) {
+        let old = self.blend_modes.pop();
+        // We should never pop our base 'BlendMode::Normal'
+        let current = *self.blend_modes.last().unwrap();
+        if old != Some(current) {
+            self.apply_blend_mode(current);
+        }
     }
 }
 
@@ -813,11 +811,10 @@ fn draw_commands_to_path2d(commands: &[DrawCommand], is_closed: bool) -> Path2d 
 fn swf_shape_to_canvas_commands(
     shape: &DistilledShape,
     bitmap_source: &dyn BitmapSource,
-    bitmaps: &[BitmapData],
-    _pixelated_property_value: &str,
+    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
     context: &CanvasRenderingContext2d,
 ) -> ShapeData {
-    use ruffle_core::shape_utils::DrawPath;
+    use ruffle_render::shape_utils::DrawPath;
     use swf::{FillStyle, LineCapStyle, LineJoinStyle};
 
     // Some browsers will vomit if you try to load/draw an image with 0 width/height.
@@ -836,121 +833,110 @@ fn swf_shape_to_canvas_commands(
 
     let mut canvas_data = ShapeData(vec![]);
 
-    let matrix_factory: SvgsvgElement = web_sys::window()
-        .expect("window")
-        .document()
-        .expect("document")
-        .create_element_ns(Some("http://www.w3.org/2000/svg"), "svg")
-        .expect("create_element on svg")
-        .dyn_into::<SvgsvgElement>()
-        .expect("an actual SVG element");
-
-    let bounds_viewbox_matrix = matrix_factory.create_svg_matrix();
+    let bounds_viewbox_matrix = DomMatrix::new().unwrap();
     bounds_viewbox_matrix.set_a(1.0 / 20.0);
     bounds_viewbox_matrix.set_d(1.0 / 20.0);
 
     for path in &shape.paths {
-        let (style, commands, is_fill, is_closed) = match &path {
-            DrawPath::Fill {
-                style, commands, ..
-            } => (*style, commands, true, false),
-            DrawPath::Stroke {
-                style,
-                commands,
-                is_closed,
-            } => (style.fill_style(), commands, false, *is_closed),
-        };
-        let fill_style = match style {
-            FillStyle::Color(Color { r, g, b, a }) => CanvasFillStyle::Color(CanvasColor(
-                format!("rgba({},{},{},{})", r, g, b, f32::from(*a) / 255.0),
-                *r,
-                *g,
-                *b,
-                *a,
-            )),
-            FillStyle::LinearGradient(gradient) => {
-                create_linear_gradient(context, gradient, is_fill).unwrap()
-            }
-            FillStyle::RadialGradient(gradient) => {
-                create_radial_gradient(context, gradient, 0.0, is_fill).unwrap()
-            }
-            FillStyle::FocalGradient {
-                gradient,
-                focal_point,
-            } => create_radial_gradient(context, gradient, focal_point.to_f64(), is_fill).unwrap(),
-            FillStyle::Bitmap {
-                id,
-                matrix,
-                is_smoothed,
-                is_repeating,
-            } => {
-                if let Some(bitmap) = bitmap_source
-                    .bitmap(*id)
-                    .and_then(|bitmap| bitmaps.get(bitmap.handle.0))
-                {
-                    let repeat = if !*is_repeating {
-                        // NOTE: The WebGL backend does clamping in this case, just like
-                        // Flash Player, but CanvasPattern has no such option...
-                        "no-repeat"
-                    } else {
-                        "repeat"
-                    };
-
-                    let bitmap_pattern = if let Ok(Some(bitmap_pattern)) = context
-                        .create_pattern_with_html_canvas_element(&bitmap.image.canvas, repeat)
-                    {
-                        bitmap_pattern
-                    } else {
-                        log::warn!("Unable to create bitmap pattern for bitmap ID {}", id);
-                        continue;
-                    };
-
-                    let a = *matrix;
-
-                    let matrix = matrix_factory.create_svg_matrix();
-
-                    // The `1.0 / 20.0` in `bounds_viewbox_matrix` does not
-                    // affect this, so we have to do it manually here.
-                    matrix.set_a(a.a.to_f32() / 20.0);
-                    matrix.set_b(a.b.to_f32() / 20.0);
-                    matrix.set_c(a.c.to_f32() / 20.0);
-                    matrix.set_d(a.d.to_f32() / 20.0);
-                    matrix.set_e(a.tx.get() as f32 / 20.0);
-                    matrix.set_f(a.ty.get() as f32 / 20.0);
-
-                    bitmap_pattern.set_transform(&matrix);
-
-                    CanvasFillStyle::Pattern(bitmap_pattern, *is_smoothed)
-                } else {
-                    log::error!("Couldn't fill shape with unknown bitmap {}", id);
-                    CanvasFillStyle::Color(CanvasColor("rgba(0,0,0,0)".to_string(), 0, 0, 0, 0))
-                }
-            }
-        };
-
-        let canvas_path = Path2d::new().unwrap();
-        canvas_path.add_path_with_transformation(
-            &draw_commands_to_path2d(commands, is_closed),
-            &bounds_viewbox_matrix,
-        );
-
         match path {
-            DrawPath::Fill { .. } => {
+            DrawPath::Fill {
+                commands, style, ..
+            } => {
+                let canvas_path = Path2d::new().unwrap();
+                canvas_path.add_path_with_transformation(
+                    &draw_commands_to_path2d(commands, false),
+                    bounds_viewbox_matrix.unchecked_ref(),
+                );
+
+                let fill_style = match style {
+                    FillStyle::Color(color) => CanvasFillStyle::Color(color.into()),
+                    FillStyle::LinearGradient(gradient) => CanvasFillStyle::Gradient(
+                        create_linear_gradient(context, gradient, true).unwrap(),
+                    ),
+                    FillStyle::RadialGradient(gradient) => CanvasFillStyle::Gradient(
+                        create_radial_gradient(context, gradient, 0.0, true).unwrap(),
+                    ),
+                    FillStyle::FocalGradient {
+                        gradient,
+                        focal_point,
+                    } => CanvasFillStyle::Gradient(
+                        create_radial_gradient(context, gradient, focal_point.to_f64(), true)
+                            .unwrap(),
+                    ),
+                    FillStyle::Bitmap {
+                        id,
+                        matrix,
+                        is_smoothed,
+                        is_repeating,
+                    } => {
+                        let bitmap = if let Some(bitmap) = create_bitmap_pattern(
+                            *id,
+                            *matrix,
+                            *is_smoothed,
+                            *is_repeating,
+                            bitmap_source,
+                            bitmaps,
+                            context,
+                        ) {
+                            bitmap
+                        } else {
+                            continue;
+                        };
+                        CanvasFillStyle::Bitmap(bitmap)
+                    }
+                };
+
                 canvas_data.0.push(CanvasDrawCommand::Fill {
                     path: canvas_path,
                     fill_style,
                 });
             }
-            DrawPath::Stroke { style, .. } => {
-                // Flash always renders strokes with a minimum width of 1 pixel (20 twips).
-                // Additionally, many SWFs use the "hairline" stroke setting, which sets the stroke's width
-                // to 1 twip. Because of the minimum, this will effectively make the stroke nearly-always render
-                // as 1 pixel wide.
-                // SVG doesn't have a minimum and can render strokes at fractional widths, so these hairline
-                // strokes end up rendering very faintly if we use the actual width of 1 twip.
-                // Therefore, we clamp the stroke width to 1 pixel (20 twips). This won't be 100% accurate
-                // if the shape is scaled, but it looks much closer to the Flash Player.
-                let line_width = std::cmp::max(style.width().get(), 20);
+            DrawPath::Stroke {
+                commands,
+                style,
+                is_closed,
+            } => {
+                let canvas_path = Path2d::new().unwrap();
+                canvas_path.add_path_with_transformation(
+                    &draw_commands_to_path2d(commands, *is_closed),
+                    bounds_viewbox_matrix.unchecked_ref(),
+                );
+
+                let stroke_style = match style.fill_style() {
+                    FillStyle::Color(color) => CanvasStrokeStyle::Color(color.into()),
+                    FillStyle::LinearGradient(gradient) => {
+                        CanvasStrokeStyle::Gradient(gradient.clone(), None)
+                    }
+                    FillStyle::RadialGradient(gradient) => {
+                        CanvasStrokeStyle::Gradient(gradient.clone(), Some(0.0))
+                    }
+                    FillStyle::FocalGradient {
+                        gradient,
+                        focal_point,
+                    } => CanvasStrokeStyle::Gradient(gradient.clone(), Some(focal_point.to_f64())),
+                    FillStyle::Bitmap {
+                        id,
+                        matrix,
+                        is_smoothed,
+                        is_repeating,
+                    } => {
+                        let bitmap = if let Some(bitmap) = create_bitmap_pattern(
+                            *id,
+                            *matrix,
+                            *is_smoothed,
+                            *is_repeating,
+                            bitmap_source,
+                            bitmaps,
+                            context,
+                        ) {
+                            bitmap
+                        } else {
+                            continue;
+                        };
+                        CanvasStrokeStyle::Bitmap(bitmap)
+                    }
+                };
+
                 let line_cap = match style.start_cap() {
                     LineCapStyle::Round => "round",
                     LineCapStyle::Square => "square",
@@ -963,11 +949,17 @@ fn swf_shape_to_canvas_commands(
                 };
                 canvas_data.0.push(CanvasDrawCommand::Stroke {
                     path: canvas_path,
-                    line_width: line_width as f64 / 20.0,
-                    stroke_style: fill_style,
+                    line_width: style.width().to_pixels(),
+                    stroke_style,
                     line_cap: line_cap.to_string(),
                     line_join: line_join.to_string(),
                     miter_limit: miter_limit as f64 / 20.0,
+                    scale_mode: match (style.allow_scale_x(), style.allow_scale_y()) {
+                        (false, false) => LineScaleMode::None,
+                        (true, false) => LineScaleMode::Horizontal,
+                        (false, true) => LineScaleMode::Vertical,
+                        (true, true) => LineScaleMode::Both,
+                    },
                 });
             }
         }
@@ -975,35 +967,18 @@ fn swf_shape_to_canvas_commands(
     canvas_data
 }
 
-/// Converts an SWF color from sRGB space to linear color space.
-pub fn srgb_to_linear(mut color: swf::Color) -> swf::Color {
-    fn to_linear_channel(n: u8) -> u8 {
-        let mut n = f32::from(n) / 255.0;
-        n = if n <= 0.04045 {
-            n / 12.92
-        } else {
-            f32::powf((n + 0.055) / 1.055, 2.4)
-        };
-        (n.clamp(0.0, 1.0) * 255.0).round() as u8
-    }
-    color.r = to_linear_channel(color.r);
-    color.g = to_linear_channel(color.g);
-    color.b = to_linear_channel(color.b);
-    color
-}
-
 fn create_linear_gradient(
     context: &CanvasRenderingContext2d,
     gradient: &swf::Gradient,
     is_fill: bool,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     // Canvas linear gradients are configured via the line endpoints, so we only need
     // to transform it if the basis is not orthogonal (skew in the transform).
     let transformed = if is_fill {
         let dot = gradient.matrix.a * gradient.matrix.c + gradient.matrix.b * gradient.matrix.d;
         dot.to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
     } else {
-        // TODO: Gradient transforms don't work correctly with strokes.
+        // Complex gradient transforms can't apply to strokes; fall back to simple transforms.
         false
     };
     let create_fn = |matrix: swf::Matrix, gradient_scale: f64| {
@@ -1027,7 +1002,7 @@ fn create_radial_gradient(
     gradient: &swf::Gradient,
     focal_point: f64,
     is_fill: bool,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     // Canvas radial gradients can not be elliptical or skewed, so transform if there
     // is a non-uniform scale or skew.
     // A scale rotation matrix is always of the form:
@@ -1037,7 +1012,7 @@ fn create_radial_gradient(
         (gradient.matrix.a - gradient.matrix.d).to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
             || (gradient.matrix.b + gradient.matrix.c).to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
     } else {
-        // TODO: Gradient transforms don't work correctly with strokes.
+        // Complex gradient transforms can't apply to strokes; fall back to simple transforms.
         false
     };
     let create_fn = |matrix: swf::Matrix, gradient_scale: f64| {
@@ -1076,7 +1051,7 @@ fn swf_to_canvas_gradient(
     swf_gradient: &swf::Gradient,
     transformed: bool,
     mut create_gradient_fn: impl FnMut(swf::Matrix, f64) -> Result<CanvasGradient, JsError>,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     let matrix = if transformed {
         // When we are rendering a complex gradient, the gradient transform is handled later by
         // transforming the path before rendering; so use the indentity matrix here.
@@ -1166,35 +1141,120 @@ fn swf_to_canvas_gradient(
         }
     }
 
-    if transformed {
-        // When we render this gradient, we will push the gradient's transform to the canvas,
-        // and then transform the path itself by the inverse.
-        let matrix = DomMatrix::new_with_array64(
+    Ok(Gradient {
+        gradient: canvas_gradient,
+        transform: transformed.then(|| {
+            // When we render this gradient, we will push the gradient's transform to the canvas,
+            // and then transform the path itself by the inverse.
+            let matrix = swf_gradient.matrix.to_dom_matrix();
+            let inverse_matrix = matrix.inverse();
+            GradientTransform {
+                matrix: [
+                    matrix.a(),
+                    matrix.b(),
+                    matrix.c(),
+                    matrix.d(),
+                    matrix.e(),
+                    matrix.f(),
+                ],
+                inverse_matrix,
+            }
+        }),
+    })
+}
+
+/// Converts an SWF bitmap fill to a canvas pattern.
+fn create_bitmap_pattern(
+    id: swf::CharacterId,
+    matrix: swf::Matrix,
+    is_smoothed: bool,
+    is_repeating: bool,
+    bitmap_source: &dyn BitmapSource,
+    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
+    context: &CanvasRenderingContext2d,
+) -> Option<CanvasBitmap> {
+    if let Some(bitmap) = bitmap_source
+        .bitmap(id)
+        .and_then(|bitmap| bitmaps.get(&bitmap.handle))
+    {
+        let repeat = if !is_repeating {
+            // NOTE: The WebGL backend does clamping in this case, just like
+            // Flash Player, but CanvasPattern has no such option...
+            "no-repeat"
+        } else {
+            "repeat"
+        };
+
+        let pattern = match context.create_pattern_with_html_canvas_element(&bitmap.canvas, repeat)
+        {
+            Ok(Some(pattern)) => pattern,
+            _ => {
+                log::warn!("Unable to create bitmap pattern for bitmap ID {}", id);
+                return None;
+            }
+        };
+        pattern.set_transform(matrix.to_dom_matrix().unchecked_ref());
+        Some(CanvasBitmap {
+            pattern,
+            matrix: matrix.into(),
+            smoothed: is_smoothed,
+        })
+    } else {
+        log::warn!("Couldn't fill shape with unknown bitmap {}", id);
+        None
+    }
+}
+
+/// The current masking behavior of the canvas.
+#[derive(Debug, Eq, PartialEq)]
+enum MaskState {
+    // Content is being drawn.
+    DrawContent,
+
+    // A clipping layer is being drawn.
+    // Paths should be added to the `Path2d` instead of drawn to the canvas.
+    DrawMask(Path2d),
+
+    // A clipping layer is being cleared.
+    // On a canvas, all draws are a no-op until the clear is complete.
+    ClearMask,
+}
+
+/// Extension trait for easily converting from Ruffle matrices to `DomMatrix`.
+trait MatrixExt {
+    fn to_dom_matrix(&self) -> DomMatrix;
+}
+
+impl MatrixExt for Matrix {
+    fn to_dom_matrix(&self) -> DomMatrix {
+        DomMatrix::new_with_array64(
             [
-                swf_gradient.matrix.a.to_f64() / 20.0,
-                swf_gradient.matrix.b.to_f64() / 20.0,
-                swf_gradient.matrix.c.to_f64() / 20.0,
-                swf_gradient.matrix.d.to_f64() / 20.0,
-                swf_gradient.matrix.tx.to_pixels(),
-                swf_gradient.matrix.ty.to_pixels(),
+                self.a.into(),
+                self.b.into(),
+                self.c.into(),
+                self.d.into(),
+                self.tx.to_pixels(),
+                self.ty.to_pixels(),
             ]
             .as_mut_slice(),
         )
-        .into_js_result()?;
-        let inverse_gradient_matrix = matrix.inverse();
-        Ok(CanvasFillStyle::TransformedGradient(TransformedGradient {
-            gradient: canvas_gradient,
-            gradient_matrix: [
-                matrix.a(),
-                matrix.b(),
-                matrix.c(),
-                matrix.d(),
-                matrix.e(),
-                matrix.f(),
-            ],
-            inverse_gradient_matrix,
-        }))
-    } else {
-        Ok(CanvasFillStyle::Gradient(canvas_gradient))
+        .unwrap()
+    }
+}
+
+impl MatrixExt for swf::Matrix {
+    fn to_dom_matrix(&self) -> DomMatrix {
+        DomMatrix::new_with_array64(
+            [
+                self.a.to_f64() / 20.0,
+                self.b.to_f64() / 20.0,
+                self.c.to_f64() / 20.0,
+                self.d.to_f64() / 20.0,
+                self.tx.to_pixels(),
+                self.ty.to_pixels(),
+            ]
+            .as_mut_slice(),
+        )
+        .unwrap()
     }
 }

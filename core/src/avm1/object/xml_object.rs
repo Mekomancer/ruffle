@@ -7,10 +7,8 @@ use crate::impl_custom_object;
 use crate::string::{AvmString, WStr, WString};
 use crate::xml::{XmlNode, ELEMENT_NODE, TEXT_NODE};
 use gc_arena::{Collect, GcCell, MutationContext};
-use quick_xml::events::{BytesDecl, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{events::Event, Reader};
 use std::fmt;
-use std::io::Cursor;
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
@@ -63,17 +61,8 @@ pub struct XmlObjectData<'gc> {
     /// The root node of the XML document.
     root: XmlNode<'gc>,
 
-    /// Whether or not the document has a document declaration.
-    has_xmldecl: bool,
-
-    /// The XML version string, if set.
-    version: String,
-
-    /// The XML document encoding, if set.
-    encoding: Option<String>,
-
-    /// The XML standalone flag, if set.
-    standalone: Option<String>,
+    /// The XML declaration, if set.
+    xml_decl: Option<AvmString<'gc>>,
 
     /// The XML doctype, if set.
     doctype: Option<AvmString<'gc>>,
@@ -96,14 +85,11 @@ impl<'gc> XmlObject<'gc> {
         let object = Self(GcCell::allocate(
             gc_context,
             XmlObjectData {
-                base: ScriptObject::object(gc_context, proto),
+                base: ScriptObject::new(gc_context, proto),
                 root,
-                has_xmldecl: false,
-                version: "1.0".to_string(),
-                encoding: None,
-                standalone: None,
+                xml_decl: None,
                 doctype: None,
-                id_map: ScriptObject::bare_object(gc_context),
+                id_map: ScriptObject::new(gc_context, None),
                 status: XmlStatus::NoError,
             },
         ));
@@ -114,6 +100,11 @@ impl<'gc> XmlObject<'gc> {
     /// Yield the document in node form.
     pub fn as_node(self) -> XmlNode<'gc> {
         self.0.read().root
+    }
+
+    /// Retrieve the XML declaration of this document.
+    pub fn xml_decl(self) -> Option<AvmString<'gc>> {
+        self.0.read().xml_decl
     }
 
     /// Retrieve the first DocType node in the document.
@@ -181,7 +172,7 @@ impl<'gc> XmlObject<'gc> {
                     let is_whitespace_char = |c: &u8| matches!(*c, b'\t' | b'\n' | b'\r' | b' ');
                     let is_whitespace_text = text.iter().all(is_whitespace_char);
                     if !(text.is_empty() || ignore_white && is_whitespace_text) {
-                        let text = AvmString::new_utf8_bytes(activation.context.gc_context, text)?;
+                        let text = AvmString::new_utf8_bytes(activation.context.gc_context, &text);
                         let child =
                             XmlNode::new(activation.context.gc_context, TEXT_NODE, Some(text));
                         open_tags
@@ -189,6 +180,13 @@ impl<'gc> XmlObject<'gc> {
                             .unwrap()
                             .append_child(activation.context.gc_context, child);
                     }
+                }
+                Event::Decl(bd) => {
+                    let mut xml_decl = WString::from_buf(b"<?".to_vec());
+                    xml_decl.push_str(WStr::from_units(bd.as_ref()));
+                    xml_decl.push_str(WStr::from_units(b"?>"));
+                    self.0.write(activation.context.gc_context).xml_decl =
+                        Some(AvmString::new(activation.context.gc_context, xml_decl));
                 }
                 Event::DocType(bt) => {
                     // TODO: `quick-xml` is case-insensitive for DOCTYPE declarations,
@@ -201,58 +199,12 @@ impl<'gc> XmlObject<'gc> {
                     self.0.write(activation.context.gc_context).doctype =
                         Some(AvmString::new(activation.context.gc_context, doctype));
                 }
-                Event::Decl(bd) => {
-                    let mut self_write = self.0.write(activation.context.gc_context);
-
-                    self_write.has_xmldecl = true;
-                    self_write.version = String::from_utf8(bd.version()?.into_owned())
-                        .map_err(|e| quick_xml::Error::Utf8(e.utf8_error()))?;
-                    self_write.encoding = if let Some(encoding) = bd.encoding() {
-                        Some(
-                            String::from_utf8(encoding?.into_owned())
-                                .map_err(|e| quick_xml::Error::Utf8(e.utf8_error()))?,
-                        )
-                    } else {
-                        None
-                    };
-                    self_write.standalone = if let Some(standalone) = bd.standalone() {
-                        Some(
-                            String::from_utf8(standalone?.into_owned())
-                                .map_err(|e| quick_xml::Error::Utf8(e.utf8_error()))?,
-                        )
-                    } else {
-                        None
-                    };
-                }
                 Event::Eof => break,
                 _ => {}
             }
         }
 
         Ok(())
-    }
-
-    /// Generate a string matching the XML document declaration, if there is
-    /// one.
-    pub fn xmldecl_string(self) -> Result<Option<String>, quick_xml::Error> {
-        let self_read = self.0.read();
-
-        if self_read.has_xmldecl {
-            let mut result = Vec::new();
-            let mut writer = Writer::new(Cursor::new(&mut result));
-            let bd = BytesDecl::new(
-                self_read.version.as_bytes(),
-                self_read.encoding.as_ref().map(|s| s.as_bytes()),
-                self_read.standalone.as_ref().map(|s| s.as_bytes()),
-            );
-            writer.write_event(Event::Decl(bd))?;
-
-            Ok(Some(
-                String::from_utf8(result).map_err(|e| quick_xml::Error::Utf8(e.utf8_error()))?,
-            ))
-        } else {
-            Ok(None)
-        }
     }
 
     /// Obtain the script object for the document's `idMap` property.

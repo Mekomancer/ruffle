@@ -3,8 +3,10 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::value::Value;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::avm2::{Error, Object};
 use crate::events::KeyCode;
 use crate::string::AvmString;
@@ -15,7 +17,7 @@ pub fn class_init<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
@@ -24,14 +26,14 @@ pub fn instance_init<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::package("flash.ui"), "Keyboard"),
-        Some(QName::new(Namespace::public(), "Object").into()),
+        Some(Multiname::public("Object")),
         Method::from_builtin(instance_init, "<Keyboard instance initializer>", mc),
         Method::from_builtin(class_init, "<Keyboard class initializer>", mc),
         mc,
@@ -349,7 +351,7 @@ fn caps_lock<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     log::warn!("Keyboard.capsLock: not yet implemented");
     Ok(false.into())
 }
@@ -358,7 +360,7 @@ fn has_virtual_keyboard<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     log::warn!("Keyboard.hasVirtualKeyboard: not yet implemented");
     Ok(false.into())
 }
@@ -367,7 +369,7 @@ fn num_lock<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     log::warn!("Keyboard.numLock: not yet implemented");
     Ok(false.into())
 }
@@ -376,7 +378,7 @@ fn physical_keyboard_type<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     log::warn!("Keyboard.physicalKeyboardType: not yet implemented");
     Ok(AvmString::new_utf8(activation.context.gc_context, "alphanumeric").into())
 }
@@ -385,7 +387,7 @@ fn is_accessible<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     log::warn!("Keyboard.isAccessible: not yet implemented");
     Ok(true.into())
 }

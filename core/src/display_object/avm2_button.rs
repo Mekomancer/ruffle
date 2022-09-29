@@ -12,6 +12,7 @@ use crate::display_object::interactive::{
 };
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, MovieClip, TDisplayObject};
 use crate::events::{ClipEvent, ClipEventResult};
+use crate::frame_lifecycle::catchup_display_object_to_frame;
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::vminterface::Instantiator;
@@ -195,13 +196,13 @@ impl<'gc> Avm2Button<'gc> {
                     .instantiate_by_id(record.id, context.gc_context)
                 {
                     Ok(child) => {
-                        child.set_matrix(context.gc_context, &record.matrix.into());
+                        child.set_matrix(context.gc_context, record.matrix.into());
                         child.set_depth(context.gc_context, record.depth.into());
 
                         if swf_state != swf::ButtonState::HIT_TEST {
                             child.set_color_transform(
                                 context.gc_context,
-                                &record.color_transform.clone().into(),
+                                record.color_transform.clone().into(),
                             );
                         }
 
@@ -224,7 +225,7 @@ impl<'gc> Avm2Button<'gc> {
 
             child.set_parent(context.gc_context, Some(self.into()));
             child.post_instantiation(context, None, Instantiator::Movie, false);
-            child.construct_frame(context);
+            catchup_display_object_to_frame(context, child);
 
             (child, false)
         } else {
@@ -232,7 +233,7 @@ impl<'gc> Avm2Button<'gc> {
 
             state_sprite.set_avm2_class(context.gc_context, Some(sprite_class));
             state_sprite.set_parent(context.gc_context, Some(self.into()));
-            state_sprite.construct_frame(context);
+            catchup_display_object_to_frame(context, state_sprite.into());
 
             for (child, depth) in children {
                 // `parent` returns `null` for these grandchildren during construction time, even though
@@ -242,7 +243,7 @@ impl<'gc> Avm2Button<'gc> {
                 state_sprite.replace_at_depth(context, child, depth.into());
                 child.set_parent(context.gc_context, Some(self.into()));
                 child.post_instantiation(context, None, Instantiator::Movie, false);
-                child.construct_frame(context);
+                catchup_display_object_to_frame(context, child);
                 child.set_parent(context.gc_context, Some(state_sprite.into()));
             }
 
@@ -428,6 +429,28 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         self.set_state(context, ButtonState::Up);
     }
 
+    fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
+        let hit_area = self.0.read().hit_area;
+        if let Some(hit_area) = hit_area {
+            hit_area.enter_frame(context);
+        }
+
+        let up_state = self.0.read().up_state;
+        if let Some(up_state) = up_state {
+            up_state.enter_frame(context);
+        }
+
+        let down_state = self.0.read().down_state;
+        if let Some(down_state) = down_state {
+            down_state.enter_frame(context);
+        }
+
+        let over_state = self.0.read().over_state;
+        if let Some(over_state) = over_state {
+            over_state.enter_frame(context);
+        }
+    }
+
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
         let hit_area = self.0.read().hit_area;
         if let Some(hit_area) = hit_area {
@@ -481,7 +504,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 up_state.post_instantiation(context, None, Instantiator::Movie, false);
 
                 if let Some(up_container) = up_state.as_container() {
-                    for (_depth, child) in up_container.iter_depth_list() {
+                    for child in up_container.iter_render_list() {
                         dispatch_added_event((*self).into(), child, false, context);
                     }
                 }
@@ -491,7 +514,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 over_state.post_instantiation(context, None, Instantiator::Movie, false);
 
                 if let Some(over_container) = over_state.as_container() {
-                    for (_depth, child) in over_container.iter_depth_list() {
+                    for child in over_container.iter_render_list() {
                         dispatch_added_event((*self).into(), child, false, context);
                     }
                 }
@@ -501,7 +524,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 down_state.post_instantiation(context, None, Instantiator::Movie, false);
 
                 if let Some(down_container) = down_state.as_container() {
-                    for (_depth, child) in down_container.iter_depth_list() {
+                    for child in down_container.iter_render_list() {
                         dispatch_added_event((*self).into(), child, false, context);
                     }
                 }
@@ -511,7 +534,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 hit_area.post_instantiation(context, None, Instantiator::Movie, false);
 
                 if let Some(hit_container) = hit_area.as_container() {
-                    for (_depth, child) in hit_container.iter_depth_list() {
+                    for child in hit_container.iter_render_list() {
                         dispatch_added_event((*self).into(), child, false, context);
                     }
                 }
@@ -606,7 +629,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         }
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
+    fn render_self(&self, context: &mut RenderContext<'_, 'gc, '_>) {
         let state = self.0.read().state;
         let current_state = self.get_state_child(state.into());
 
