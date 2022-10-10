@@ -145,8 +145,15 @@ pub struct WebGlRenderBackend {
 }
 
 struct RegistryData {
+    gl: Gl,
     bitmap: Bitmap,
     texture: WebGlTexture,
+}
+
+impl Drop for RegistryData {
+    fn drop(&mut self) {
+        self.gl.delete_texture(Some(&self.texture));
+    }
 }
 
 const MAX_GRADIENT_COLORS: usize = 15;
@@ -368,7 +375,7 @@ impl WebGlRenderBackend {
                 0,
             );
             self.gl
-                .enable_vertex_attrib_array(program.vertex_position_location as u32);
+                .enable_vertex_attrib_array(program.vertex_position_location);
         }
 
         if program.vertex_color_location != 0xffff_ffff {
@@ -381,7 +388,7 @@ impl WebGlRenderBackend {
                 8,
             );
             self.gl
-                .enable_vertex_attrib_array(program.vertex_color_location as u32);
+                .enable_vertex_attrib_array(program.vertex_color_location);
         }
         self.bind_vertex_array(None);
         for i in program.num_vertex_attributes..NUM_VERTEX_ATTRIBUTES {
@@ -402,8 +409,14 @@ impl WebGlRenderBackend {
                     DrawType::Color
                 },
                 vao,
-                vertex_buffer,
-                index_buffer,
+                vertex_buffer: Buffer {
+                    gl: self.gl.clone(),
+                    buffer: vertex_buffer,
+                },
+                index_buffer: Buffer {
+                    gl: self.gl.clone(),
+                    buffer: index_buffer,
+                },
                 num_indices: 6,
                 num_mask_indices: 6,
             }],
@@ -601,7 +614,7 @@ impl WebGlRenderBackend {
                     0,
                 );
                 self.gl
-                    .enable_vertex_attrib_array(program.vertex_position_location as u32);
+                    .enable_vertex_attrib_array(program.vertex_position_location);
             }
 
             if program.vertex_color_location != 0xffff_ffff {
@@ -614,23 +627,35 @@ impl WebGlRenderBackend {
                     8,
                 );
                 self.gl
-                    .enable_vertex_attrib_array(program.vertex_color_location as u32);
+                    .enable_vertex_attrib_array(program.vertex_color_location);
             }
 
             draws.push(match draw.draw_type {
                 TessDrawType::Color => Draw {
                     draw_type: DrawType::Color,
                     vao,
-                    vertex_buffer,
-                    index_buffer,
+                    vertex_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: vertex_buffer,
+                    },
+                    index_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: index_buffer,
+                    },
                     num_indices,
                     num_mask_indices,
                 },
                 TessDrawType::Gradient(gradient) => Draw {
                     draw_type: DrawType::Gradient(Box::new(Gradient::from(gradient))),
                     vao,
-                    vertex_buffer,
-                    index_buffer,
+                    vertex_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: vertex_buffer,
+                    },
+                    index_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: index_buffer,
+                    },
                     num_indices,
                     num_mask_indices,
                 },
@@ -642,8 +667,14 @@ impl WebGlRenderBackend {
                         is_repeating: bitmap.is_repeating,
                     }),
                     vao,
-                    vertex_buffer,
-                    index_buffer,
+                    vertex_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: vertex_buffer,
+                    },
+                    index_buffer: Buffer {
+                        gl: self.gl.clone(),
+                        buffer: index_buffer,
+                    },
                     num_indices,
                     num_mask_indices,
                 },
@@ -683,6 +714,18 @@ impl WebGlRenderBackend {
         } else {
             self.vao_ext.bind_vertex_array_oes(vao);
         };
+    }
+
+    fn delete_mesh(&self, mesh: &Mesh) {
+        if let Some(gl2) = &self.gl2 {
+            for draw in &mesh.draws {
+                gl2.delete_vertex_array(Some(&draw.vao));
+            }
+        } else {
+            for draw in &mesh.draws {
+                self.vao_ext.delete_vertex_array_oes(Some(&draw.vao));
+            }
+        }
     }
 
     fn set_stencil_state(&mut self) {
@@ -894,12 +937,10 @@ impl RenderBackend for WebGlRenderBackend {
         // We don't use `.clamp()` here because `self.gl.drawing_buffer_width()` and
         // `self.gl.drawing_buffer_height()` return zero when the WebGL context is lost,
         // then an assertion error would be triggered.
-        self.renderbuffer_width = (dimensions.width as i32)
-            .max(1)
-            .min(self.gl.drawing_buffer_width());
-        self.renderbuffer_height = (dimensions.height as i32)
-            .max(1)
-            .min(self.gl.drawing_buffer_height());
+        self.renderbuffer_width =
+            (dimensions.width.max(1) as i32).min(self.gl.drawing_buffer_width());
+        self.renderbuffer_height =
+            (dimensions.height.max(1) as i32).min(self.gl.drawing_buffer_height());
 
         // Recreate framebuffers with the new size.
         let _ = self.build_msaa_buffers();
@@ -924,6 +965,7 @@ impl RenderBackend for WebGlRenderBackend {
         bitmap_source: &dyn BitmapSource,
         handle: ShapeHandle,
     ) {
+        self.delete_mesh(&self.meshes[handle.0]);
         let mesh = self.register_shape_internal(shape, bitmap_source);
         self.meshes[handle.0] = mesh;
     }
@@ -981,8 +1023,14 @@ impl RenderBackend for WebGlRenderBackend {
 
         let handle = self.next_bitmap_handle;
         self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
-        self.bitmap_registry
-            .insert(handle, RegistryData { bitmap, texture });
+        self.bitmap_registry.insert(
+            handle,
+            RegistryData {
+                gl: self.gl.clone(),
+                bitmap,
+                texture,
+            },
+        );
 
         Ok(handle)
     }
@@ -1203,11 +1251,6 @@ impl CommandHandler for WebGlRenderBackend {
                     );
                     program.uniform1i(
                         &self.gl,
-                        ShaderUniform::GradientNumColors,
-                        gradient.num_colors as i32,
-                    );
-                    program.uniform1i(
-                        &self.gl,
                         ShaderUniform::GradientRepeatMode,
                         gradient.repeat_mode,
                     );
@@ -1387,7 +1430,6 @@ struct Gradient {
     gradient_type: i32,
     ratios: [f32; MAX_GRADIENT_COLORS],
     colors: [[f32; 4]; MAX_GRADIENT_COLORS],
-    num_colors: u32,
     repeat_mode: i32,
     focal_point: f32,
     interpolation: swf::GradientInterpolation,
@@ -1414,7 +1456,6 @@ impl From<TessGradient> for Gradient {
             },
             ratios,
             colors,
-            num_colors: gradient.num_colors as u32,
             repeat_mode: match gradient.repeat_mode {
                 swf::GradientSpread::Pad => 0,
                 swf::GradientSpread::Repeat => 1,
@@ -1438,11 +1479,22 @@ struct Mesh {
     draws: Vec<Draw>,
 }
 
+struct Buffer {
+    gl: Gl,
+    buffer: WebGlBuffer,
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.gl.delete_buffer(Some(&self.buffer));
+    }
+}
+
 #[allow(dead_code)]
 struct Draw {
     draw_type: DrawType,
-    vertex_buffer: WebGlBuffer,
-    index_buffer: WebGlBuffer,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
     vao: WebGlVertexArrayObject,
     num_indices: i32,
     num_mask_indices: i32,
@@ -1474,7 +1526,7 @@ struct ShaderProgram {
 }
 
 // These should match the uniform names in the shaders.
-const NUM_UNIFORMS: usize = 13;
+const NUM_UNIFORMS: usize = 12;
 const UNIFORM_NAMES: [&str; NUM_UNIFORMS] = [
     "world_matrix",
     "view_matrix",
@@ -1484,7 +1536,6 @@ const UNIFORM_NAMES: [&str; NUM_UNIFORMS] = [
     "u_gradient_type",
     "u_ratios",
     "u_colors",
-    "u_num_colors",
     "u_repeat_mode",
     "u_focal_point",
     "u_interpolation",
@@ -1500,7 +1551,6 @@ enum ShaderUniform {
     GradientType,
     GradientRatios,
     GradientColors,
-    GradientNumColors,
     GradientRepeatMode,
     GradientFocalPoint,
     GradientInterpolation,

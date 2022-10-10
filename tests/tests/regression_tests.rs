@@ -155,6 +155,7 @@ swf_tests! {
     (as2_super_and_this_v8, "avm1/as2_super_and_this_v8", 1),
     (as2_super_via_manual_prototype, "avm1/as2_super_via_manual_prototype", 1),
     (as3_add, "avm2/add", 1),
+    (as3_application_domain, "avm2/application_domain", 1),
     (as3_array_access, "avm2/array_access", 1),
     (as3_array_concat, "avm2/array_concat", 1),
     (as3_array_constr, "avm2/array_constr", 1),
@@ -190,11 +191,13 @@ swf_tests! {
     (as3_astypelate, "avm2/astypelate", 1),
     (as3_bitand, "avm2/bitand", 1),
     (as3_bitmap_constr, "avm2/bitmap_constr", 1),
+    (as3_bitmap_data, "avm2/bitmap_data", 1),
     (as3_bitmapdata_copypixels, "avm2/bitmapdata_copypixels", 2, img = true),
     #[ignore] (as3_bitmap_properties, "avm2/bitmap_properties", 1),
     (as3_bitmap_subclass, "avm2/bitmap_subclass", 1),
     #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmap_subclass_properties, "avm2/bitmap_subclass_properties", 1, img = true),
     (as3_bitmap_timeline, "avm2/bitmap_timeline", 1),
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmapdata_clone, "avm2/bitmapdata_clone", 1, img = true),
     (as3_bitmapdata_constr, "avm2/bitmapdata_constr", 1),
     (as3_bitmapdata_dispose, "avm2/bitmapdata_dispose", 1),
     // We need a render backend in order to call `BitmapData.draw`
@@ -328,6 +331,7 @@ swf_tests! {
     (as3_function_call, "avm2/function_call", 1),
     #[ignore] (as3_function_proto, "avm2/function_proto", 1),
     (as3_function_length, "avm2/function_length", 1),
+    (as3_function_object, "avm2/function_object", 1),
     (as3_function_to_locale_string, "avm2/function_to_locale_string", 1),
     (as3_function_to_string, "avm2/function_to_string", 1),
     (as3_function_type, "avm2/function_type", 1),
@@ -1035,7 +1039,7 @@ fn shared_object_avm1() -> Result<(), Error> {
     // Test SharedObject persistence. Run an SWF that saves data
     // to a shared object twice and verify that the data is saved.
     let mut memory_storage_backend: Box<dyn StorageBackend> =
-        Box::new(MemoryStorageBackend::default());
+        Box::<MemoryStorageBackend>::default();
 
     // Initial run; no shared object data.
     test_swf_with_hooks(
@@ -1089,7 +1093,7 @@ fn shared_object_avm2() -> Result<(), Error> {
     // Test SharedObject persistence. Run an SWF that saves data
     // to a shared object twice and verify that the data is saved.
     let mut memory_storage_backend: Box<dyn StorageBackend> =
-        Box::new(MemoryStorageBackend::default());
+        Box::<MemoryStorageBackend>::default();
 
     // Initial run; no shared object data.
     test_swf_with_hooks(
